@@ -90,6 +90,10 @@ PHASES = ("preprocess", "tokenize", "parse", "semantic", "ir")
 SRC_ABS = os.path.normcase(os.path.abspath(SRC)) + os.sep
 
 
+def _is_src_file(filename: str) -> bool:
+    return os.path.normcase(os.path.abspath(filename)).startswith(SRC_ABS)
+
+
 # ===========================================================================
 # 一、执行核心（在 worker 子进程 / 最小化子进程里都跑这段）
 # ===========================================================================
@@ -161,13 +165,17 @@ def _format_tb(exc, head=6, tail=24) -> str:
     return "\n".join(parts[:head] + [mid] + parts[-tail:])
 
 
-def run_pipeline(src: str) -> dict:
+def run_pipeline(src: str, collect_tb: bool = True) -> dict:
     """按顺序跑完整前端，返回结构化结果。
 
     kind:
       ok       —— 全部阶段正常返回
       reject   —— 只抛了 LexError / ParseError（合规结果）
       crash    —— 抛了其它异常（缺陷）
+
+    collect_tb=False 用于最小化：那里只关心"还是不是同一个崩溃"，
+    而格式化近千帧 RecursionError 的 traceback 比跑一遍前端还贵，
+    实测占最小化耗时的九成以上。
     """
     t0 = time.perf_counter()
     phase = PHASES[0]
@@ -195,10 +203,13 @@ def run_pipeline(src: str) -> dict:
             "detail": f"{getattr(e, 'line', '?')}:{getattr(e, 'col', '?')}",
         }
     except BaseException as e:            # noqa: BLE001 —— 这里就是要抓全部
+        # 帧定位必须每次做（它决定签名），traceback 文本可以省。
+        loc = _frame_loc(e.__traceback__) if collect_tb else _loc_fast(e)
         return {
             "kind": "crash", "phase": phase,
             "exc_type": type(e).__name__, "exc_msg": str(e),
-            "tb": _format_tb(e), "loc": _frame_loc(e.__traceback__),
+            "tb": _format_tb(e) if collect_tb else "",
+            "loc": loc,
             "duration": time.perf_counter() - t0, "detail": "",
         }
 
@@ -207,6 +218,20 @@ def run_pipeline(src: str) -> dict:
         "exc_type": None, "exc_msg": "", "tb": "", "loc": None,
         "duration": time.perf_counter() - t0, "detail": "",
     }
+
+
+def _loc_fast(exc) -> dict:
+    """不读源码文件、不碰 traceback 模块的最小定位：
+    只取 src/ 下最深那一帧的文件名与行号（签名只需要这两项 + 函数名）。"""
+    best = None
+    tb = exc.__traceback__
+    while tb is not None:
+        code = tb.tb_frame.f_code
+        if _is_src_file(code.co_filename):
+            best = {"file": os.path.basename(code.co_filename),
+                    "line": tb.tb_lineno, "func": code.co_name, "text": ""}
+        tb = tb.tb_next
+    return best
 
 
 def coarse_signature(res: dict) -> str:
@@ -330,22 +355,29 @@ class _Prober:
     候选超时就判成 hang 并放弃（泄漏的那条线程随子进程一起被父进程杀掉）。
     """
 
-    def __init__(self, timeout: float, max_leaks: int = 4):
+    def __init__(self, timeout: float, max_leaks: int = 4,
+                 deadline_seconds: float = 25.0):
         self.timeout = timeout
         self.max_leaks = max_leaks
         self.leaks = 0
         self.probes = 0
-        self.budget = 6000
+        self.budget = 3000
+        self.deadline = time.perf_counter() + deadline_seconds
+
+    @property
+    def exhausted(self) -> bool:
+        return (self.probes >= self.budget or self.leaks >= self.max_leaks
+                or time.perf_counter() > self.deadline)
 
     def __call__(self, raw: bytes):
-        if self.probes >= self.budget or self.leaks >= self.max_leaks:
+        if self.exhausted:
             return None
         self.probes += 1
         box = {}
 
         def target():
             try:
-                box["res"] = run_pipeline(_decode(raw))
+                box["res"] = run_pipeline(_decode(raw), collect_tb=False)
             except BaseException as e:                    # noqa: BLE001
                 box["res"] = {"kind": "crash", "phase": "?",
                               "exc_type": type(e).__name__, "exc_msg": str(e),
@@ -377,7 +409,8 @@ def _minimize_main() -> int:
     minimized = ddmin(raw, interesting)
     sys.stdout.write(json.dumps({"minimized": _b64(minimized).decode("ascii"),
                                  "probes": prober.probes,
-                                 "leaks": prober.leaks}))
+                                 "leaks": prober.leaks,
+                                 "exhausted": prober.exhausted}))
     sys.stdout.flush()
     os._exit(0)                 # 别等那些泄漏的守护线程
 
@@ -387,11 +420,150 @@ def _drop_chunks(data: bytes, indices) -> bytes:
     return bytes(b for i, b in enumerate(data) if i not in drop)
 
 
-def ddmin(data: bytes, interesting) -> bytes:
-    """两轮最小化：先按块删（ddmin），再逐字节删到不可再缩。
+#: 语法感知最小化用的括号对：删除成对括号、保留内部内容，
+#: 等价于"剥掉一层嵌套"，能让 ((((...)))) 这类输入缩到真正的深度阈值。
+PAIR_OPEN = {")": "(", "}": "{", "]": "["}
+PAIR_CLOSE = {"(": ")", "{": "}", "[": "]"}
 
-    ddmin 的块级删除能把 47KB 的文件砍到几十字节而只花 O(n log n) 次探测，
-    再补一轮逐字节删除收拾边界，结果就是"再删一个字符就不再崩溃"。
+
+def matched_pairs(data: bytes):
+    """返回所有配对成功的括号对 (open_idx, close_idx)，按跨度从大到小排序。
+
+    只按字符配对，不管它是不是出现在字符串/注释里——
+    最小化只要求"试着删一个还崩不崩"，误判一次只是白白花掉一次探测。
+    """
+    stack = []
+    pairs = []
+    for i, ch in enumerate(data):
+        c = chr(ch)
+        if c in PAIR_CLOSE:
+            stack.append((c, i))
+        elif c in PAIR_OPEN:
+            want = PAIR_OPEN[c]
+            # 从栈顶找最近的同类开括号
+            for k in range(len(stack) - 1, -1, -1):
+                if stack[k][0] == want:
+                    pairs.append((stack[k][1], i))
+                    del stack[k:]
+                    break
+    pairs.sort(key=lambda p: p[1] - p[0], reverse=True)
+    return pairs
+
+
+def peel_nesting(data: bytes, interesting) -> bytes:
+    """剥嵌套：一次性删掉最外层 k 个括号对的两个括号（内容保留）。
+
+    为什么单靠 ddmin 不够：`int main(){return ((((1))))}` 的
+    任何一个连续字节块被删掉都会破坏括号配平，于是候选输入只会
+    报 ParseError，配不上原来的 RecursionError 签名——块级删除
+    在"配平结构"上完全推不动。
+    成对删除保住配平，只需要 log(k) 次探测就能把 500 层降到阈值。
+    """
+    for _ in range(12):                     # 最多 12 轮，每轮至少砍一层
+        pairs = matched_pairs(data)
+        if not pairs:
+            return data
+        # 试探性地翻倍删除配对数，找到"还崩"的最大 k
+        good = 0
+        k = 1
+        while k <= len(pairs):
+            cand = _drop_chunks(data, [i for o, c in pairs[:k] for i in (o, c)])
+            if cand and interesting(cand):
+                good = k
+                k *= 2
+            else:
+                if good:
+                    break
+                # 单个都推不动，换下一批（可能是内层的）
+                if k >= len(pairs):
+                    return data
+                pairs = pairs[1:]
+                k = 1
+        if not good:
+            return data
+        data = _drop_chunks(data, [i for o, c in pairs[:good] for i in (o, c)])
+    return data
+
+
+#: 折叠重复单元时尝试的长度范围。深度递归的输入几乎都是
+#: `if(1)` / `a.b` / `-` / `[0]` 这类短单元重复上千次，
+#: 找到单元后可以用二分把重复次数降到阈值，而不是逐字节硬删。
+UNIT_LENGTHS = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 20, 24, 32)
+
+
+def _repeat_count(data: bytes, start: int, unit: int) -> int:
+    """从 start 起，单元 unit 连续重复了多少次（至少 2 次才算）。"""
+    n = 0
+    pos = start
+    while pos + unit <= len(data) and data[pos:pos + unit] == \
+            data[start:start + unit]:
+        n += 1
+        pos += unit
+    return n
+
+
+def collapse_repeats(data: bytes, interesting) -> bytes:
+    """找到"重复了几十上百次的那个单元"，用二分把次数降到还能崩的最少次数。
+
+    对 `1?` × 1000 这类输入，逐字节删除要几千次探测且常常卡住；
+    而"把 1000 次重复二分降到 128 次"只要约 10 次探测，
+    剩下的交给最后的逐字节删除收尾。
+    """
+    for _ in range(24):
+        best = None
+        for start in range(min(len(data), 400)):
+            for unit in UNIT_LENGTHS:
+                if start + unit * 2 > len(data):
+                    break
+                cnt = _repeat_count(data, start, unit)
+                if cnt < 3:
+                    continue
+                # 优先"省得最多、单元最短"的重复
+                saving = (cnt - 1) * unit
+                score = (saving, -unit)
+                if best is None or score > best[0]:
+                    best = (score, start, unit, cnt)
+        if best is None:
+            return data
+        _, start, unit, cnt = best
+        chunk = data[start:start + unit]
+
+        def build(reps: int) -> bytes:
+            return (data[:start] + chunk * reps
+                    + data[start + unit * cnt:])
+
+        # 二分找最小可用重复次数
+        lo, hi = 2, cnt
+        ok = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            cand = build(mid)
+            if interesting(cand):
+                ok = mid
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        if ok is None:
+            # 这个重复不是缺陷的必要条件，整个重复段可以删掉
+            cand = build(0)
+            if interesting(cand):
+                data = cand
+                continue
+            return data
+        data = build(ok)
+    return data
+
+
+def ddmin(data: bytes, interesting) -> bytes:
+    """四轮最小化：块级删除 → 剥嵌套 → 折叠重复 → 逐字节删除。
+
+    每种策略各治一类输入：
+      块级删除   收拾"大部分内容与崩溃无关"的普通变异体；
+      剥嵌套     收拾 ((((...)))) / {{{{...}}}} 这类配平结构，
+                 纯块删除在这里一步都推不动；
+      折叠重复   收拾 if(1) × 1000 / a.b × 1000 这类"同一个单元重复"，
+                 二分法把几千次探测压到十几次；
+      逐字节删除 收尾，保证结果真的"再删一个字符就不再崩溃"。
     """
     best = data
     n = 2
@@ -411,6 +583,16 @@ def ddmin(data: bytes, interesting) -> bytes:
                 break
             n = min(n * 2, len(best))
 
+    for strategy in (peel_nesting, collapse_repeats):
+        bent = strategy(best, interesting)
+        if len(bent) < len(best):
+            best = bent
+    # 剥嵌套可能又暴露出新的重复，反之亦然，再各跑一轮
+    for strategy in (collapse_repeats, peel_nesting):
+        bent = strategy(best, interesting)
+        if len(bent) < len(best):
+            best = bent
+
     # 逐字节删除：保证"再删一个字符就不崩了"
     changed = True
     while changed:
@@ -425,7 +607,7 @@ def ddmin(data: bytes, interesting) -> bytes:
 
 
 def minimize_isolated(raw: bytes, signature: str, timeout: float,
-                      max_seconds: float = 180.0):
+                      max_seconds: float = 90.0):
     """父进程侧调用：开一个最小化子进程，失败就返回原输入。"""
     payload = json.dumps({
         "raw": _b64(raw).decode("ascii"),
@@ -447,7 +629,10 @@ def minimize_isolated(raw: bytes, signature: str, timeout: float,
         info = json.loads(out)
     except ValueError:
         return raw, 0, "最小化输出无法解析，保留原始复现输入"
-    return _unb64(info["minimized"]), info.get("probes", 0), ""
+    note = ""
+    if info.get("exhausted"):
+        note = "（探测预算用尽，可能未完全最小）"
+    return _unb64(info["minimized"]), info.get("probes", 0), note
 
 
 # ===========================================================================
@@ -897,25 +1082,21 @@ def cli_check(raw: bytes, timeout: float) -> dict:
 
 
 def _cli_loc(stderr: str):
-    """从 CLI 的 traceback 文本里解析出最后一帧的文件与行号。"""
+    """从 CLI 的 traceback 文本里解析出最后一帧的文件与行号。
+
+    traceback 的格式是两行一组：
+        File "E:\\...\\parser.py", line 1104, in parse_primary
+        return Num(line=t.line, col=t.col, value=int(v, 16))
+    这里只取 File 那一行里的路径与行号；取不到就返回 None，
+    宁可报告里显示"未知位置"，也不编一个假位置。
+    """
+    import re as _re
     loc = None
-    last_file = None
-    for line in stderr.splitlines():
-        line = line.strip()
-        if line.startswith('File "'):
-            try:
-                body = line.split('"')[1]
-                loc = {"file": os.path.basename(body), "line": 0,
-                       "func": "", "text": ""}
-                last_file = body
-            except IndexError:
-                last_file = None
-        elif last_file and line.startswith("line ") and "," in line:
-            if loc is not None:
-                try:
-                    loc["line"] = int(line.split()[1])
-                except (IndexError, ValueError):
-                    pass
+    pat = _re.compile(r'File "([^"]+)", line (\d+), in (\S+)')
+    for m in pat.finditer(stderr):
+        path, lineno, func = m.group(1), m.group(2), m.group(3)
+        loc = {"file": os.path.basename(path), "line": int(lineno),
+               "func": func, "text": ""}
     return loc
 
 

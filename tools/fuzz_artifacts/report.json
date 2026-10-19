@@ -2,14 +2,16 @@
   "seed": 20250101,
   "source_fingerprint": {
     "csub.py": "7acdf00d0b70",
-    "src/ir.py": "4da3f5c0b853",
+    "src/ir.py": "ece883c7f5e8",
     "src/lexer.py": "e1278e41286a",
     "src/parser.py": "211d33375a3c",
     "src/preprocess.py": "f5ee87d62254",
-    "src/semantic.py": "cc8e0fe3beb8"
+    "src/semantic.py": "812c025334dc"
   },
   "source_changed_during_run": [
-    "src/ir.py",
+    "csub.py",
+    "src/lexer.py",
+    "src/preprocess.py",
     "src/semantic.py"
   ],
   "summary": {
@@ -20,7 +22,7 @@
     "crash": 18,
     "hang": 0,
     "dedup_defects": 8,
-    "elapsed": 17.490807099999074,
+    "elapsed": 15.354720700001053,
     "cli_cases": 128,
     "cli_bad": 24
   },
@@ -87,12 +89,12 @@
       "exc_msg": "maximum recursion depth exceeded",
       "loc": {
         "file": "semantic.py",
-        "line": 605,
+        "line": 649,
         "func": "check_expr",
         "text": "            self.check_expr(e.base)"
       },
       "count": 3,
-      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 184, in run_pipeline\n    analyze(prog)\n    ~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 939, in analyze\n    return Analyzer().analyze(prog)\n           ~~~~~~~~~~~~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 288, in analyze\n    self.check_func(d)\n    ~~~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 331, in check_func\n    self.check_block(fn.body, new_scope=False)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 404, in check_block\n    self.check_stmt(s)\n    ~~~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 461, in check_stmt\n    self.check_expr(s.value)\n    ~~~~~~~~~~~~~~~^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 605, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 605, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 605, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  [Previous line repeated 988 more times]\nRecursionError: maximum recursion depth exceeded\n",
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 184, in run_pipeline\n    analyze(prog)\n    ~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 1046, in analyze\n    return Analyzer().analyze(prog)\n           ~~~~~~~~~~~~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 332, in analyze\n    self.check_func(d)\n    ~~~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 375, in check_func\n    self.check_block(fn.body, new_scope=False)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 448, in check_block\n    self.check_stmt(s)\n    ~~~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 505, in check_stmt\n    self.check_expr(s.value)\n    ~~~~~~~~~~~~~~~^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 649, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 649, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 649, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  [Previous line repeated 988 more times]\nRecursionError: maximum recursion depth exceeded\n",
       "minimized_bytes": 2976,
       "minimized_repr": "'t n(){t[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0];}'",
       "repro_file": "crash_04_RecursionError.c"
@@ -123,12 +125,12 @@
       "exc_msg": "maximum recursion depth exceeded",
       "loc": {
         "file": "ir.py",
-        "line": 305,
+        "line": 330,
         "func": "gen_expr",
         "text": "            base = self.gen_expr(e.base)"
       },
       "count": 1,
-      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 187, in run_pipeline\n    generate(prog)\n    ~~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 591, in generate\n    raw = IRGen().gen_program(prog)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 99, in gen_program\n    self.gen_block(d.body, new_scope=False)\n    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 105, in gen_block\n    self.gen_stmt(s)\n    ~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 173, in gen_stmt\n    v = self.gen_expr(s.value)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 305, in gen_expr\n    base = self.gen_expr(e.base)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 305, in gen_expr\n    base = self.gen_expr(e.base)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 305, in gen_expr\n    base = self.gen_expr(e.base)\n  [Previous line repeated 989 more times]\nRecursionError: maximum recursion depth exceeded\n",
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 187, in run_pipeline\n    generate(prog)\n    ~~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 646, in generate\n    raw = IRGen().gen_program(prog)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 101, in gen_program\n    self.gen_block(d.body, new_scope=False)\n    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 107, in gen_block\n    self.gen_stmt(s)\n    ~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 179, in gen_stmt\n    v = self.gen_expr(s.value)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 330, in gen_expr\n    base = self.gen_expr(e.base)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 330, in gen_expr\n    base = self.gen_expr(e.base)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 330, in gen_expr\n    base = self.gen_expr(e.base)\n  [Previous line repeated 989 more times]\nRecursionError: maximum recursion depth exceeded\n",
       "minimized_bytes": 1991,
       "minimized_repr": "'t n(){b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b;}'",
       "repro_file": "crash_06_RecursionError.c"

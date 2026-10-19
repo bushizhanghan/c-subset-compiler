@@ -1,10 +1,10 @@
 # csub 模糊测试缺陷清单
 
 - 随机种子: `20250101`
-- ⚠ 运行期间 src/ 被改动过: `src/ir.py`、`src/semantic.py`
+- ⚠ 运行期间 src/ 被改动过: `csub.py`、`src/lexer.py`、`src/preprocess.py`、`src/semantic.py`
 - 用例总数: 764
 - 缺陷类别: 8，缺陷用例: 18
-- 源码快照: `src/ir.py`@4da3f5c0b853、`src/lexer.py`@e1278e41286a、`src/parser.py`@211d33375a3c、`src/preprocess.py`@f5ee87d62254、`src/semantic.py`@cc8e0fe3beb8
+- 源码快照: `src/ir.py`@ece883c7f5e8、`src/lexer.py`@e1278e41286a、`src/parser.py`@211d33375a3c、`src/preprocess.py`@f5ee87d62254、`src/semantic.py`@812c025334dc
 
 ## 1. `ValueError` @ `parser.py:1104` (parse 阶段)
 
@@ -156,7 +156,7 @@ RecursionError: maximum recursion depth exceeded
 
 </details>
 
-## 4. `RecursionError` @ `semantic.py:605` (semantic 阶段)
+## 4. `RecursionError` @ `semantic.py:649` (semantic 阶段)
 
 - 命中用例数: 3
 - 出错函数: `check_expr()`
@@ -175,28 +175,28 @@ Traceback (most recent call last):
   File "E:\dsh\work\csub\tools\fuzz_test.py", line 184, in run_pipeline
     analyze(prog)
     ~~~~~~~^^^^^^
-  File "E:\dsh\work\csub\src\semantic.py", line 939, in analyze
+  File "E:\dsh\work\csub\src\semantic.py", line 1046, in analyze
     return Analyzer().analyze(prog)
            ~~~~~~~~~~~~~~~~~~^^^^^^
-  File "E:\dsh\work\csub\src\semantic.py", line 288, in analyze
+  File "E:\dsh\work\csub\src\semantic.py", line 332, in analyze
     self.check_func(d)
     ~~~~~~~~~~~~~~~^^^
-  File "E:\dsh\work\csub\src\semantic.py", line 331, in check_func
+  File "E:\dsh\work\csub\src\semantic.py", line 375, in check_func
     self.check_block(fn.body, new_scope=False)
     ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "E:\dsh\work\csub\src\semantic.py", line 404, in check_block
+  File "E:\dsh\work\csub\src\semantic.py", line 448, in check_block
     self.check_stmt(s)
     ~~~~~~~~~~~~~~~^^^
-  File "E:\dsh\work\csub\src\semantic.py", line 461, in check_stmt
+  File "E:\dsh\work\csub\src\semantic.py", line 505, in check_stmt
     self.check_expr(s.value)
     ~~~~~~~~~~~~~~~^^^^^^^^^
-  File "E:\dsh\work\csub\src\semantic.py", line 605, in check_expr
+  File "E:\dsh\work\csub\src\semantic.py", line 649, in check_expr
     self.check_expr(e.base)
     ~~~~~~~~~~~~~~~^^^^^^^^
-  File "E:\dsh\work\csub\src\semantic.py", line 605, in check_expr
+  File "E:\dsh\work\csub\src\semantic.py", line 649, in check_expr
     self.check_expr(e.base)
     ~~~~~~~~~~~~~~~^^^^^^^^
-  File "E:\dsh\work\csub\src\semantic.py", line 605, in check_expr
+  File "E:\dsh\work\csub\src\semantic.py", line 649, in check_expr
     self.check_expr(e.base)
     ~~~~~~~~~~~~~~~^^^^^^^^
   [Previous line repeated 988 more times]
@@ -255,7 +255,7 @@ RecursionError: maximum recursion depth exceeded
 
 </details>
 
-## 6. `RecursionError` @ `ir.py:305` (ir 阶段)
+## 6. `RecursionError` @ `ir.py:330` (ir 阶段)
 
 - 命中用例数: 1
 - 出错函数: `gen_expr()`
@@ -274,21 +274,21 @@ Traceback (most recent call last):
   File "E:\dsh\work\csub\tools\fuzz_test.py", line 187, in run_pipeline
     generate(prog)
     ~~~~~~~~^^^^^^
-  File "E:\dsh\work\csub\src\ir.py", line 591, in generate
+  File "E:\dsh\work\csub\src\ir.py", line 646, in generate
     raw = IRGen().gen_program(prog)
-  File "E:\dsh\work\csub\src\ir.py", line 99, in gen_program
+  File "E:\dsh\work\csub\src\ir.py", line 101, in gen_program
     self.gen_block(d.body, new_scope=False)
     ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "E:\dsh\work\csub\src\ir.py", line 105, in gen_block
+  File "E:\dsh\work\csub\src\ir.py", line 107, in gen_block
     self.gen_stmt(s)
     ~~~~~~~~~~~~~^^^
-  File "E:\dsh\work\csub\src\ir.py", line 173, in gen_stmt
+  File "E:\dsh\work\csub\src\ir.py", line 179, in gen_stmt
     v = self.gen_expr(s.value)
-  File "E:\dsh\work\csub\src\ir.py", line 305, in gen_expr
+  File "E:\dsh\work\csub\src\ir.py", line 330, in gen_expr
     base = self.gen_expr(e.base)
-  File "E:\dsh\work\csub\src\ir.py", line 305, in gen_expr
+  File "E:\dsh\work\csub\src\ir.py", line 330, in gen_expr
     base = self.gen_expr(e.base)
-  File "E:\dsh\work\csub\src\ir.py", line 305, in gen_expr
+  File "E:\dsh\work\csub\src\ir.py", line 330, in gen_expr
     base = self.gen_expr(e.base)
   [Previous line repeated 989 more times]
 RecursionError: maximum recursion depth exceeded
