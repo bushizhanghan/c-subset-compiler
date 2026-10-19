@@ -1,0 +1,16 @@
+﻿__pycache__/
+*.pyc
+.playwright-cli/
+*.log
+
+# 本地生成的报告（可由 render.py 重建）
+report.html
+_rpt.html
+examples/_*.html
+
+# 虚拟环境
+.venv/
+venv/
+
+# 注意：tools/fuzz_artifacts/ 是刻意保留的
+# 里面是模糊测试发现的崩溃样本与报告，属于测试资产，必须入库

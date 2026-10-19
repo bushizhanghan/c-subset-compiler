@@ -1,0 +1,173 @@
+{
+  "seed": 20250101,
+  "source_fingerprint": {
+    "csub.py": "7acdf00d0b70",
+    "src/ir.py": "4da3f5c0b853",
+    "src/lexer.py": "e1278e41286a",
+    "src/parser.py": "211d33375a3c",
+    "src/preprocess.py": "f5ee87d62254",
+    "src/semantic.py": "cc8e0fe3beb8"
+  },
+  "source_changed_during_run": [
+    "src/ir.py",
+    "src/semantic.py"
+  ],
+  "summary": {
+    "total": 764,
+    "bad": 18,
+    "ok": 173,
+    "reject": 573,
+    "crash": 18,
+    "hang": 0,
+    "dedup_defects": 8,
+    "elapsed": 17.490807099999074,
+    "cli_cases": 128,
+    "cli_bad": 24
+  },
+  "defects": [
+    {
+      "index": 1,
+      "signature": "parse|ValueError|parser.py|parse_primary",
+      "phase": "parse",
+      "exc_type": "ValueError",
+      "exc_msg": "invalid literal for int() with base 16: '0x'",
+      "loc": {
+        "file": "parser.py",
+        "line": 1104,
+        "func": "parse_primary",
+        "text": "                return Num(line=t.line, col=t.col, value=int(v, 16))"
+      },
+      "count": 4,
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 181, in run_pipeline\n    prog = parse(pr.text)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1191, in parse\n    return Parser(tokenize(src)).parse()\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  ... [省略 7 行 traceback 帧] ...\n    fn.body = self.parse_block()\n              ~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 827, in parse_block\n    blk.stmts.append(self.parse_stmt())\n                     ~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 947, in parse_stmt\n    e = self.parse_expr()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 957, in parse_expr\n    e = self.parse_assign()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 975, in parse_ternary\n    cond = self.parse_binary(1)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 986, in parse_binary\n    left = self.parse_unary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1023, in parse_unary\n    return self.parse_postfix()\n           ~~~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1026, in parse_postfix\n    e = self.parse_primary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1104, in parse_primary\n    return Num(line=t.line, col=t.col, value=int(v, 16))\n                                             ~~~^^^^^^^\nValueError: invalid literal for int() with base 16: '0x'",
+      "minimized_bytes": 8,
+      "minimized_repr": "'t n(){0x'",
+      "repro_file": "crash_01_ValueError.c"
+    },
+    {
+      "index": 2,
+      "signature": "parse|RecursionError|parser.py|parse_ternary",
+      "phase": "parse",
+      "exc_type": "RecursionError",
+      "exc_msg": "maximum recursion depth exceeded",
+      "loc": {
+        "file": "parser.py",
+        "line": 975,
+        "func": "parse_ternary",
+        "text": "        cond = self.parse_binary(1)"
+      },
+      "count": 3,
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 181, in run_pipeline\n    prog = parse(pr.text)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1191, in parse\n    return Parser(tokenize(src)).parse()\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  ... [省略 2113 行 traceback 帧] ...\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1132, in parse_primary\n    e = self.parse_expr()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 957, in parse_expr\n    e = self.parse_assign()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 975, in parse_ternary\n    cond = self.parse_binary(1)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 986, in parse_binary\n    left = self.parse_unary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1023, in parse_unary\n    return self.parse_postfix()\n           ~~~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1026, in parse_postfix\n    e = self.parse_primary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1132, in parse_primary\n    e = self.parse_expr()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 957, in parse_expr\n    e = self.parse_assign()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 975, in parse_ternary\n    cond = self.parse_binary(1)\nRecursionError: maximum recursion depth exceeded",
+      "minimized_bytes": 423,
+      "minimized_repr": "'int main(){ return ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))); }'",
+      "repro_file": "crash_02_RecursionError.c"
+    },
+    {
+      "index": 3,
+      "signature": "parse|RecursionError|parser.py|parse_unary",
+      "phase": "parse",
+      "exc_type": "RecursionError",
+      "exc_msg": "maximum recursion depth exceeded",
+      "loc": {
+        "file": "parser.py",
+        "line": 1023,
+        "func": "parse_unary",
+        "text": "        return self.parse_postfix()"
+      },
+      "count": 3,
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 181, in run_pipeline\n    prog = parse(pr.text)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1191, in parse\n    return Parser(tokenize(src)).parse()\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  ... [省略 2367 行 traceback 帧] ...\n    args.append(self.parse_assign())\n                ~~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 975, in parse_ternary\n    cond = self.parse_binary(1)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 986, in parse_binary\n    left = self.parse_unary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1023, in parse_unary\n    return self.parse_postfix()\n           ~~~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1047, in parse_postfix\n    args.append(self.parse_assign())\n                ~~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 975, in parse_ternary\n    cond = self.parse_binary(1)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 986, in parse_binary\n    left = self.parse_unary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1023, in parse_unary\n    return self.parse_postfix()\n           ~~~~~~~~~~~~~~~~~~^^\nRecursionError: maximum recursion depth exceeded",
+      "minimized_bytes": 1223,
+      "minimized_repr": "'int main(){ return f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(1)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))); }'",
+      "repro_file": "crash_03_RecursionError.c"
+    },
+    {
+      "index": 4,
+      "signature": "semantic|RecursionError|semantic.py|check_expr",
+      "phase": "semantic",
+      "exc_type": "RecursionError",
+      "exc_msg": "maximum recursion depth exceeded",
+      "loc": {
+        "file": "semantic.py",
+        "line": 605,
+        "func": "check_expr",
+        "text": "            self.check_expr(e.base)"
+      },
+      "count": 3,
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 184, in run_pipeline\n    analyze(prog)\n    ~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 939, in analyze\n    return Analyzer().analyze(prog)\n           ~~~~~~~~~~~~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 288, in analyze\n    self.check_func(d)\n    ~~~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 331, in check_func\n    self.check_block(fn.body, new_scope=False)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 404, in check_block\n    self.check_stmt(s)\n    ~~~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 461, in check_stmt\n    self.check_expr(s.value)\n    ~~~~~~~~~~~~~~~^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 605, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 605, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\semantic.py\", line 605, in check_expr\n    self.check_expr(e.base)\n    ~~~~~~~~~~~~~~~^^^^^^^^\n  [Previous line repeated 988 more times]\nRecursionError: maximum recursion depth exceeded\n",
+      "minimized_bytes": 2976,
+      "minimized_repr": "'t n(){t[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0];}'",
+      "repro_file": "crash_04_RecursionError.c"
+    },
+    {
+      "index": 5,
+      "signature": "parse|RecursionError|parser.py|expect",
+      "phase": "parse",
+      "exc_type": "RecursionError",
+      "exc_msg": "maximum recursion depth exceeded",
+      "loc": {
+        "file": "parser.py",
+        "line": 297,
+        "func": "expect",
+        "text": "        if not self.at(value):"
+      },
+      "count": 2,
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 181, in run_pipeline\n    prog = parse(pr.text)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1191, in parse\n    return Parser(tokenize(src)).parse()\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  ... [省略 2961 行 traceback 帧] ...\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 827, in parse_block\n    blk.stmts.append(self.parse_stmt())\n                     ~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 845, in parse_stmt\n    return self.parse_block()\n           ~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 827, in parse_block\n    blk.stmts.append(self.parse_stmt())\n                     ~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 845, in parse_stmt\n    return self.parse_block()\n           ~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 827, in parse_block\n    blk.stmts.append(self.parse_stmt())\n                     ~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 845, in parse_stmt\n    return self.parse_block()\n           ~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 822, in parse_block\n    lb = self.expect(\"{\")\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 297, in expect\n    if not self.at(value):\n           ~~~~~~~^^^^^^^\nRecursionError: maximum recursion depth exceeded",
+      "minimized_bytes": 1012,
+      "minimized_repr": "'int main(){{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}'",
+      "repro_file": "crash_05_RecursionError.c"
+    },
+    {
+      "index": 6,
+      "signature": "ir|RecursionError|ir.py|gen_expr",
+      "phase": "ir",
+      "exc_type": "RecursionError",
+      "exc_msg": "maximum recursion depth exceeded",
+      "loc": {
+        "file": "ir.py",
+        "line": 305,
+        "func": "gen_expr",
+        "text": "            base = self.gen_expr(e.base)"
+      },
+      "count": 1,
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 187, in run_pipeline\n    generate(prog)\n    ~~~~~~~~^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 591, in generate\n    raw = IRGen().gen_program(prog)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 99, in gen_program\n    self.gen_block(d.body, new_scope=False)\n    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 105, in gen_block\n    self.gen_stmt(s)\n    ~~~~~~~~~~~~~^^^\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 173, in gen_stmt\n    v = self.gen_expr(s.value)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 305, in gen_expr\n    base = self.gen_expr(e.base)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 305, in gen_expr\n    base = self.gen_expr(e.base)\n  File \"E:\\dsh\\work\\csub\\src\\ir.py\", line 305, in gen_expr\n    base = self.gen_expr(e.base)\n  [Previous line repeated 989 more times]\nRecursionError: maximum recursion depth exceeded\n",
+      "minimized_bytes": 1991,
+      "minimized_repr": "'t n(){b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b.b;}'",
+      "repro_file": "crash_06_RecursionError.c"
+    },
+    {
+      "index": 7,
+      "signature": "parse|RecursionError|parser.py|parse_postfix",
+      "phase": "parse",
+      "exc_type": "RecursionError",
+      "exc_msg": "maximum recursion depth exceeded",
+      "loc": {
+        "file": "parser.py",
+        "line": 1026,
+        "func": "parse_postfix",
+        "text": "        e = self.parse_primary()"
+      },
+      "count": 1,
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 181, in run_pipeline\n    prog = parse(pr.text)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1191, in parse\n    return Parser(tokenize(src)).parse()\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  ... [省略 1973 行 traceback 帧] ...\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 978, in parse_ternary\n    then = self.parse_assign()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 978, in parse_ternary\n    then = self.parse_assign()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 978, in parse_ternary\n    then = self.parse_assign()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 975, in parse_ternary\n    cond = self.parse_binary(1)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 986, in parse_binary\n    left = self.parse_unary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1023, in parse_unary\n    return self.parse_postfix()\n           ~~~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1026, in parse_postfix\n    e = self.parse_primary()\nRecursionError: maximum recursion depth exceeded",
+      "minimized_bytes": 4023,
+      "minimized_repr": "'int main(){ return 1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1?1:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:...[截断，共 4023 字节]",
+      "repro_file": "crash_07_RecursionError.c"
+    },
+    {
+      "index": 8,
+      "signature": "parse|RecursionError|parser.py|parse_primary",
+      "phase": "parse",
+      "exc_type": "RecursionError",
+      "exc_msg": "maximum recursion depth exceeded",
+      "loc": {
+        "file": "parser.py",
+        "line": 1073,
+        "func": "parse_primary",
+        "text": "        if self.at(\"{\"):"
+      },
+      "count": 1,
+      "traceback": "Traceback (most recent call last):\n  File \"E:\\dsh\\work\\csub\\tools\\fuzz_test.py\", line 181, in run_pipeline\n    prog = parse(pr.text)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1191, in parse\n    return Parser(tokenize(src)).parse()\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  ... [省略 14 行 traceback 帧] ...\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 858, in parse_stmt\n    then = self.parse_stmt()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 858, in parse_stmt\n    then = self.parse_stmt()\n  [Previous line repeated 980 more times]\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 856, in parse_stmt\n    cond = self.parse_expr()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 957, in parse_expr\n    e = self.parse_assign()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 965, in parse_assign\n    left = self.parse_ternary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 975, in parse_ternary\n    cond = self.parse_binary(1)\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 986, in parse_binary\n    left = self.parse_unary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1023, in parse_unary\n    return self.parse_postfix()\n           ~~~~~~~~~~~~~~~~~~^^\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1026, in parse_postfix\n    e = self.parse_primary()\n  File \"E:\\dsh\\work\\csub\\src\\parser.py\", line 1073, in parse_primary\n    if self.at(\"{\"):\n       ~~~~~~~^^^^^\nRecursionError: maximum recursion depth exceeded",
+      "minimized_bytes": 4896,
+      "minimized_repr": "'t in(){ if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)if(1)i...[截断，共 4896 字节]",
+      "repro_file": "crash_08_RecursionError.c"
+    }
+  ]
+}
