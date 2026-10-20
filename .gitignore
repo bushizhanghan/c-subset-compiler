@@ -14,3 +14,16 @@ venv/
 
 # 注意：tools/fuzz_artifacts/ 是刻意保留的
 # 里面是模糊测试发现的崩溃样本与报告，属于测试资产，必须入库
+
+# 后端生成的汇编与可执行文件（可由 codegen.py 重建）
+*.s
+*.exe
+
+# 临时对照文件
+_base_*.json
+
+# 后端自测的临时构建目录与核查脚本
+tools/_codegen_build/
+tools/cg_progs/
+tools/_cg_check_*.py
+_base_*.json

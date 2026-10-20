@@ -566,6 +566,7 @@ class Analyzer:
         elif isinstance(s, Return):
             if s.value is not None:
                 self.check_expr(s.value)
+                self.check_return_local_addr(s)
         elif isinstance(s, (Break, Continue)):
             if self.loop_depth == 0:
                 self.err("E11", s.line, s.col,
@@ -1134,6 +1135,53 @@ class Analyzer:
         for mty, _name in sd.members:
             total += self._sizeof_type(mty)
         return total or 4
+
+    def check_return_local_addr(self, ret) -> None:
+        """检查是否返回了局部变量的地址（D.1 号禁区）。
+
+        `return &local;` 是最经典的悬垂指针来源：
+        函数一返回栈帧就失效，调用方拿到的是野指针。
+        教材讲"函数返回指针"时列为头号错误，gcc 也只给
+        -Wreturn-local-addr 警告，程序照跑不误然后打出垃圾值。
+
+        检测范围（保守，只报确凿的）：
+          - return &局部变量
+          - return 局部数组名（数组名本身退化成地址）
+        不报全局变量/静态变量/malloc 的结果——那些是合法的。
+        """
+        if self.cur_func is None:
+            return
+        v = ret.value
+        # 情形 1：return &x
+        if isinstance(v, UnOp) and v.op == "&":
+            target = v.operand
+            if isinstance(target, Ident):
+                sym = self.scope.lookup(target.name)
+                if sym is None:
+                    return
+                if sym.kind in ("param",):
+                    return          # 形参的地址来自调用方，合法
+                # 全局变量与静态变量返回地址是合法的
+                if self.globals.lookup_local(target.name) is sym:
+                    return
+                self.warn("W9", ret.line, ret.col,
+                          f"返回了局部变量 {target.name!r} 的地址，"
+                          f"该地址在函数返回后失效",
+                          "改用全局变量、static 变量，或用 malloc 分配")
+                return
+        # 情形 2：return 局部数组名（数组名退化为首地址）
+        if isinstance(v, Ident):
+            sym = self.scope.lookup(v.name)
+            if sym is None or sym.kind != "var":
+                return
+            if sym.vtype is None or sym.vtype.array is None:
+                return              # 不是数组，返回的是值，合法
+            if self.globals.lookup_local(v.name) is sym:
+                return              # 全局数组可以返回
+            self.warn("W9", ret.line, ret.col,
+                      f"返回了局部数组 {v.name!r}（数组名退化为首地址），"
+                      f"该地址在函数返回后失效",
+                      "改用全局数组、static 数组，或用 malloc 分配")
     def check_lvalue(self, e) -> Optional[str]:
         """左值检查：只验证"这个标识符存不存在"，不检查是否已初始化。
 
