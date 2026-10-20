@@ -1,4 +1,4 @@
-﻿"""中间表示（三地址码 IR）生成与优化。
+"""中间表示（三地址码 IR）生成与优化。
 
 教学价值在于"看得见"：学生写的 a = b + c * 2 究竟变成什么，
 这是《计算机系统基础》里最难讲清的部分。
@@ -20,6 +20,7 @@ from parser import (
     Program, FuncDef, VarDecl, Block, If, While, For, Return, Break,
     Continue, ExprStmt, Num, Str, Ident, BinOp, UnOp, Assign, Call,
     Index, Member, DeclGroup, DoWhile, Switch, Case, Label, Goto,
+    Ternary, InitList,
 )
 
 
@@ -66,7 +67,16 @@ class Instr:
             return f"{self.dst} = *{self.a1}"
         if self.op == "param":
             return f"param {self.a1}"
+        if self.op == "nop":
+            return "nop   ; 不支持的语法"
         return f"{self.op} {self.dst or ''} {self.a1 or ''}".strip()
+
+
+# 复合赋值 -> 二元运算。a += 2 就是 a = a + 2。
+COMPOUND_ASSIGN = {
+    "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
+    "&=": "&", "|=": "|", "^=": "^", "<<=": "<<", ">>=": ">>",
+}
 
 
 class IRGen:
@@ -251,6 +261,16 @@ class IRGen:
         self.loop_stack.pop()
         self.emit("label", extra=lend)
     def gen_vardecl(self, vd: VarDecl):
+        # 初始化列表：int a[3] = {1,2,3};
+        # 必须逐元素 store 到数组里，且 store 的目标要带上数组名。
+        # 早期版本走通用路径，InitList 落到兜底 return "?"，
+        # 于是生成 `a = ?`，而且 store 的 extra 是空的，不可执行。
+        if isinstance(vd.init, InitList):
+            for idx, item in enumerate(vd.init.items):
+                v = self.gen_expr(item)
+                self.emit("store", a1=str(idx), a2=v, extra=vd.name,
+                          line=vd.line)
+            return
         if vd.init is not None:
             v = self.gen_expr(vd.init)
             self.emit("=", dst=vd.name, a1=v, line=vd.line)
@@ -274,8 +294,48 @@ class IRGen:
             return t
 
         if isinstance(e, UnOp):
+            # 自增 / 自减：++a / a++ / --a / a--。
+            # 早期版本走 else 分支只做"="，即 t1 = a，
+            # 变量本身完全没被写回 —— 循环里 i++ 会让 IR 死循环。
+            # 这里必须真的算出新值并写回目标。
+            if e.op in ("++", "--", "post++", "post--"):
+                is_dec = e.op in ("--", "post--")
+                is_post = e.op.startswith("post")
+                operand = e.operand
+                if isinstance(operand, Ident):
+                    tgt = operand.name
+                else:
+                    tgt = None
+                cur = self.gen_expr(operand)
+                t = self.newtmp()
+                self.emit("-" if is_dec else "+", dst=t, a1=cur, a2="1",
+                          line=e.line)
+                if tgt is not None:
+                    self.emit("=", dst=tgt, a1=t, line=e.line)
+                elif isinstance(operand, UnOp) and operand.op == "*":
+                    p = self.gen_expr(operand.operand)
+                    self.emit("store", a1="0", a2=t, extra=p, line=e.line)
+                # 表达式值：前缀返回新值；后缀必须返回**加之前的旧值**。
+                # 注意不能直接把 cur 这个符号名当结果——它已被改写。
+                # 必须先落一个临时变量保存旧值，否则 `int b = a++;`
+                # 会生成 `b = a`（此时 a 已加过），b 拿到的是 6 而非 5。
+                if is_post:
+                    told = self.newtmp()
+                    self.emit("=", dst=told, a1=cur, line=e.line)
+                    # 这两条必须在写回之前，这里靠 gen_expr 的调用顺序
+                    # 已经先生成了 told = cur，再生成自增，顺序正确。
+                    return told
+                return t
+
             if e.op == "sizeof":
-                return "4"          # 教学用，统一按 4 字节
+                # 用语义层算好的真实尺寸（semantic.sizeof_node 挂在节点上）。
+                # 早期一律返回 4，导致 sizeof(int[10]) 也算成 4，
+                # 而 sizeof(arr)/sizeof(arr[0]) 这个取数组长度的惯用法
+                # 就完全失效了。
+                sz = getattr(e, "size_value", None)
+                if isinstance(sz, int) and sz > 0:
+                    return str(sz)
+                return "4"
             v = self.gen_expr(e.operand)
             t = self.newtmp()
             if e.op == "-":
@@ -296,7 +356,20 @@ class IRGen:
             return t
 
         if isinstance(e, Assign):
-            v = self.gen_expr(e.value)
+            # 复合赋值：a += 2 等价于 a = a + 2。
+            # 早期版本只处理 op == "="，其余复合赋值一律当成普通赋值，
+            # 于是 `a += 2` 生成 `a = 2` —— 原值整个丢掉，语义是错的。
+            op = e.op
+            if op != "=" and op in COMPOUND_ASSIGN:
+                cur = self.gen_expr(e.target)      # 读当前值
+                rhs = self.gen_expr(e.value)
+                t = self.newtmp()
+                self.emit(COMPOUND_ASSIGN[op], dst=t, a1=cur, a2=rhs,
+                          line=e.line)
+                v = t
+            else:
+                v = self.gen_expr(e.value)
+
             if isinstance(e.target, Ident):
                 self.emit("=", dst=e.target.name, a1=v, line=e.line)
                 return e.target.name
@@ -329,6 +402,31 @@ class IRGen:
         if isinstance(e, Member):
             base = self.gen_expr(e.base)
             return f"{base}.{e.name}"
+
+        if isinstance(e, Ternary):
+            # a ? b : c —— 用条件跳转实现，两个分支都汇到同一个临时变量。
+            # 早期版本没有这个分支，落到兜底的 return "?"，
+            # 于是 `return x ? 10 : 20;` 生成 `return ?`，不可执行。
+            lfalse = self.newlabel()
+            lend = self.newlabel()
+            cond = self.gen_expr(e.cond)
+            self.emit("if", a1=cond, extra=lfalse)
+            tv = self.gen_expr(e.then)
+            t = self.newtmp()
+            self.emit("=", dst=t, a1=tv, line=e.line)
+            self.emit("goto", extra=lend)
+            self.emit("label", extra=lfalse)
+            ev = self.gen_expr(e.els)
+            self.emit("=", dst=t, a1=ev, line=e.line)
+            self.emit("label", extra=lend)
+            return t
+
+        if isinstance(e, InitList):
+            # 表达式位置的初始化列表（如函数实参 {1,2}）——C99 复合字面量，
+            # 本项目不支持。这里明确拒绝而不是生成 `a = ?` 这种
+            # 看似正常、实际不可执行的指令。
+            self.emit("nop", line=e.line)
+            return "initlist"
 
         return "?"
 

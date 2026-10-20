@@ -286,3 +286,170 @@ int main() {
 }
 """, set()),
 ]
+
+
+# ---- parser 边界回归（防旧坑复发）----
+EXTRA_CASES += [
+    # peek() 与 peek(1) 返回同一个 token，这是踩过的坑：
+    # 曾用 self.peek(1) 判断"标识符后是冒号"，结果和 peek() 一样
+    # 永远指向下一个 token，导致 goto 标签识别失败。
+    ("ok_goto_label", """
+int main() {
+    int x = 1;
+  L: x = 2;
+    goto L;
+    return x;
+}
+""", set()),
+
+    # 三目里的冒号不能被误判成 goto 标签
+    ("ok_ternary_not_label", """
+int main() {
+    int a = 1;
+    int b = 2;
+    return a > b ? a : b;
+}
+""", set()),
+
+    # 嵌套三目（右结合）
+    ("ok_nested_ternary", """
+int main() {
+    int x = 2;
+    int r = x == 1 ? 10 : x == 2 ? 20 : 30;
+    return r;
+}
+""", set()),
+
+    # 函数指针参数（曾因缺少支持而整份 numpy 文件卡住）
+    ("ok_funcptr_param", """
+void reg(void (*cb)(void *), void *arg) { cb(arg); }
+int main() { return 0; }
+""", set()),
+
+    # 多维数组维度是常量表达式
+    ("ok_array_expr_dim", """
+int main() {
+    int a[2 * 3];
+    a[5] = 1;
+    return a[5];
+}
+""", set()),
+
+    ("err_array_expr_dim_oob", """
+int main() {
+    int a[2 * 3];
+    a[6] = 1;
+    return 0;
+}
+""", {"E13"}),
+
+    # 相邻字符串字面量拼接（跨行）
+    ("ok_string_concat", """
+int main() {
+    printf("first part "
+           "second part\\n");
+    return 0;
+}
+""", set()),
+]
+
+
+# ---- 健壮性回归（防崩溃复发）----
+# 这些输入正常 C 文件不会出现，但一旦出现，早期版本是直接
+# traceback 崩掉而不是给诊断。工具崩溃比报错更糟：
+# 学生看到一堆 Python 栈就没法继续了。
+EXTRA_CASES += [
+    # 深嵌套括号：超过 200 层必须报可读的 ParseError，不能 RecursionError
+    ("err_deep_paren", """
+int main() {
+    return ((((((((((((((((((((((((((((((((((((((((((((((
+    (((((((((((((((((((((((((((((((((((((((((((((((((((
+    1
+    )))))))))))))))))))))))))))))))))))))))))))))))))))
+    ))))))))))))))))))))))))))))))))))))))))))))))))))));
+}
+""", {"SYN"}),
+
+    # 超大整数字面量：超 4300 位不能抛 ValueError
+    # 注意必须写成单行——C 的数字字面量不能跨行（这点和字符串不同）
+    ("ok_huge_int_literal",
+     "int main() { return " + "9" * 5000 + "; }",
+     set()),
+
+    # 大整数旁边仍要能正常查错
+    ("err_oob_with_huge_int", """
+int main() {
+    int a[3];
+    a[5] = 1;
+    return 999999999999999999999999999999999999999999999999;
+}
+""", {"E13"}),
+
+    # scanf 漏 &：真实高频错误，必须报 E16
+    ("err_scanf_missing_addr", """
+int main() {
+    int v;
+    scanf("%d", v);
+    return 0;
+}
+""", {"E16"}),
+
+    # scanf 正确写法不报
+    ("ok_scanf_with_addr", """
+int main() {
+    int v;
+    scanf("%d", &v);
+    return v;
+}
+""", set()),
+
+    # 非 void 函数 if 链缺兜底 return
+    ("warn_missing_return", """
+int sign(int x) {
+    if (x > 0) { return 1; }
+    else if (x < 0) { return -1; }
+}
+int main() { return sign(0); }
+""", set()),
+]
+
+
+# ---- sizeof 语义（真实类型尺寸，不再是硬编码 4）----
+# 这些用例的正确性由 tools/ir_verify.py 的执行对比兜底，
+# 这里只保证不报错、不误报。
+EXTRA_CASES += [
+    ("ok_sizeof_type", """
+int main() {
+    int a = sizeof(int);
+    int b = sizeof(char);
+    int c = sizeof(double);
+    return a + b + c;
+}
+""", set()),
+
+    ("ok_sizeof_array_idiom", """
+int main() {
+    int arr[10];
+    /* sizeof(arr)/sizeof(arr[0]) 是取数组长度的经典写法，
+       必须算成 10，且不能因为两个 sizeof 相除就误报 W3 */
+    int n = sizeof(arr) / sizeof(arr[0]);
+    return n;
+}
+""", set()),
+
+    ("ok_sizeof_ptr", """
+int main() {
+    int *p;
+    /* 指针尺寸固定 8 字节（64 位模型） */
+    return sizeof(p);
+}
+""", set()),
+
+    ("ok_sizeof_struct", """
+struct Point { int x; int y; };
+int main() {
+    /* 结构体尺寸 = 成员之和，不考虑对齐填充（教学简化） */
+    return sizeof(struct Point);
+}
+""", set()),
+]

@@ -1,4 +1,4 @@
-﻿"""语义分析：符号表、类型检查、以及初学者易错点检测。
+"""语义分析：符号表、类型检查、以及初学者易错点检测。
 
 这个模块是整个项目的价值核心。它不只是"能不能编译"，
 而是"能指出初学者最常犯的错，并说清为什么错"。
@@ -114,15 +114,17 @@ STD_FUNCS = {
     "strlen": (1, 1, set()), "strcpy": (2, 2, set()),
     "strncpy": (3, 3, set()), "strcmp": (2, 2, set()),
     "strcat": (2, 2, set()), "memset": (3, 3, set()),
-    "memcpy": (3, 3, set()), "scanf": (1, 99, "varargs_out"),
-    "sscanf": (2, 99, "varargs_out"), "exit": (1, 1, set()),
+    "memcpy": (3, 3, set()), "scanf": (1, 99, "needs_addr_out"),
+    "sscanf": (2, 99, "needs_addr_out"),
+    "fscanf": (2, 99, "needs_addr_out"),
+    "sscanf": (2, 99, "needs_addr_out"), "exit": (1, 1, set()),
     "abs": (1, 1, set()), "labs": (1, 1, set()),
     "sqrt": (1, 1, set()), "pow": (2, 2, set()),
     "fabs": (1, 1, set()), "floor": (1, 1, set()),
     "ceil": (1, 1, set()), "log": (1, 1, set()),
     "exp": (1, 1, set()), "sin": (1, 1, set()), "cos": (1, 1, set()),
     "fopen": (2, 2, set()), "fclose": (1, 1, set()),
-    "fprintf": (2, 99, set()), "fscanf": (2, 99, "varargs_out"),
+    "fprintf": (2, 99, set()), "fscanf": (2, 99, "needs_addr_out"),
     "fgets": (3, 3, set()), "sprintf": (2, 99, set()),
     "snprintf": (3, 99, set()), "atoi": (1, 1, set()),
     "atof": (1, 1, set()), "atol": (1, 1, set()),
@@ -271,6 +273,12 @@ class Analyzer:
         self.loop_depth = 0
         self.structs: dict[str, StructDef] = {}
         self.typedefs: dict[str, Type] = {}
+        # 表达式递归深度。t[0][0][0]... 这种超长下标链在 AST 里
+        # 是深度嵌套的 Index，check_expr 每层递归一次，
+        # 几百层就把 Python 栈打爆（实测 crash_04 崩在
+        # semantic.py 的 check_expr 自递归上）。
+        self._expr_depth = 0
+        self.MAX_EXPR_DEPTH = 150
 
     # ---- 工具 ----
     def err(self, code, line, col, msg, hint=""):
@@ -374,31 +382,86 @@ class Analyzer:
                 line=fn.line, col=fn.col))
         self.check_block(fn.body, new_scope=False)
 
-        # main 必须有返回值
-        if fn.name == "main" and not self.block_returns(fn.body):
+        # 非 void 函数必须有返回值。
+        # 早期版本只查 main，其他函数（如 int max(...) 忘了 return）
+        # 完全不报——而那是真实作业里错误率很高的一类。
+        # 注意 void 函数不要求 return，别误报。
+        if (fn.ret_type is None or fn.ret_type.base != "void") \
+                and fn.body is not None \
+                and not self.block_returns(fn.body):
+            who = fn.name if fn.name != "main" else "main"
+            hint = ("在末尾补 return 0;（C99 起 main 隐式返回 0，"
+                    "但显式写更清楚）" if fn.name == "main"
+                    else f"{fn.name} 声明为 {fn.ret_type.base if fn.ret_type else '?'}，"
+                         "所有控制流路径都必须有 return")
             self.warn("W8", fn.line, fn.col,
-                      "main 函数可能没有 return 语句",
-                      "在末尾补 return 0;（C99 起隐式返回 0，但显式写更清楚）")
+                      f"{who} 函数可能没有 return 语句", hint)
         self.pop()
         self.cur_func = None
 
     def block_returns(self, blk) -> bool:
-        """粗判：块末尾是否有 return。只做保守判断，不追求精确。"""
-        for s in reversed(blk.stmts):
-            if isinstance(s, Return):
-                return True
-            if isinstance(s, If) and s.els is not None:
-                if self.stmt_returns(s.then) or self.stmt_returns(s.els):
-                    return True
-        return False
+        """判断这个块是否"末尾能保证有返回值"。
 
-    def stmt_returns(self, s) -> bool:
+        判定规则（保守但能接住真实高频错误）：
+          1) 块里最后一条有效语句是 return  -> 有返回
+          2) 最后一条是 if/else 且两支都返回  -> 有返回
+          3) 最后一条是 if 链但没有 else 兜底 -> **无返回**（真实高频错误）
+          4) 其他情况（中途有 return、循环等）-> 当作有返回，不报
+
+        为什么不做得更精确：真正的路径可达性分析需要控制流图。
+        而 W8 只是 warning，误报会直接摧毁信任
+        （实测 real_fortranobject.c 有个 90 行函数、中途大量 return，
+         早期粗判把它误报了一次）。所以规则 4 主动放行。
+        但规则 3 必须报：`if/else if` 忘了 else 兜底、
+        或者函数体只有 if 没有 else，是真实作业里最常见的缺 return 写法。
+        """
+        stmts = [s for s in blk.stmts
+                 if not (isinstance(s, Block) and not s.stmts)]
+        if not stmts:
+            return False
+        last = stmts[-1]
+        if isinstance(last, Return):
+            return True
+        if isinstance(last, If):
+            # if 有 else 且两支都返回 -> 安全
+            if last.els is not None:
+                return (self.block_returns_of_stmt(last.then)
+                        and self.block_returns_of_stmt(last.els))
+            # if 无 else -> 存在不走 if 的路径
+            return False
+        # 中途有 return 的情况：放行，避免误报长函数
+        return self._has_any_return(blk)
+
+    def block_returns_of_stmt(self, s) -> bool:
+        """单条语句是否一定返回。"""
         if isinstance(s, Return):
             return True
         if isinstance(s, Block):
             return self.block_returns(s)
-        if isinstance(s, If) and s.els is not None:
-            return self.stmt_returns(s.then) or self.stmt_returns(s.els)
+        if isinstance(s, If):
+            if s.els is None:
+                return False
+            return (self.block_returns_of_stmt(s.then)
+                    and self.block_returns_of_stmt(s.els))
+        return False
+
+    def _has_any_return(self, node, _depth=0) -> bool:
+        """递归查找任意位置的 Return 节点。"""
+        if _depth > 60:
+            return True          # 太深就当作有，避免误报
+        if isinstance(node, Return):
+            return True
+        if isinstance(node, Block):
+            return any(self._has_any_return(s, _depth + 1)
+                       for s in node.stmts)
+        if isinstance(node, If):
+            return (self._has_any_return(node.then, _depth + 1)
+                    or self._has_any_return(node.els, _depth + 1))
+        if isinstance(node, (While, For, DoWhile)):
+            return self._has_any_return(node.body, _depth + 1)
+        if isinstance(node, Switch):
+            return any(self._has_any_return(s, _depth + 1)
+                       for s in (node.body.stmts if node.body else []))
         return False
 
     # ---- 声明 ----
@@ -525,13 +588,47 @@ class Analyzer:
                       f"条件恒为{'真' if truth else '假'}（常量 {cond.value}）",
                       "检查是否漏写了变量或比较")
         if t == "float":
-            self.warn("W5", cond.line, cond.col,
-                      "条件表达式是浮点数，与 0 直接比较可能因精度出错",
-                      "改用 fabs(x) < 1e-6 之类的写法")
+            # 只有"浮点表达式与 0 直接比较"才有精度风险。
+            # 早期版本不区分条件形态，只要条件整体是浮点就报，
+            # 于是 `if (a + b == c)` 也被说成"与 0 直接比较"——
+            # 结论方向没错但文案是错的，学生会以为代码里有个 0。
+            is_zero_cmp = (
+                isinstance(cond, BinOp)
+                and cond.op in ("==", "!=", "<", ">", "<=", ">=")
+                and ((isinstance(cond.right, Num) and cond.right.value == 0)
+                     or (isinstance(cond.left, Num) and cond.left.value == 0))
+            )
+            if is_zero_cmp:
+                self.warn("W5", cond.line, cond.col,
+                          "浮点值与 0 直接比较，可能因精度出错",
+                          "改用 fabs(x) < 1e-6 之类的写法")
+            else:
+                # 浮点之间用 == 比较同样有风险，但文案不同
+                if isinstance(cond, BinOp) and cond.op in ("==", "!="):
+                    self.warn("W5", cond.line, cond.col,
+                              "浮点值用 == 或 != 比较，可能因精度出错",
+                              "浮点运算有误差，建议比较差值是否小于阈值")
 
     # ---- 表达式 ----
     def check_expr(self, e) -> Optional[str]:
-        """返回表达式的推导类型名，未知返回 None。"""
+        """返回表达式的推导类型名，未知返回 None。
+
+        带递归深度保护：超长下标链/成员链会让 AST 深达数百层，
+        不做限制就是 RecursionError（stack overflow），
+        而学生需要的是诊断不是 traceback。
+        """
+        self._expr_depth += 1
+        try:
+            if self._expr_depth > self.MAX_EXPR_DEPTH:
+                self.err("E17", getattr(e, "line", 0), getattr(e, "col", 0),
+                         "表达式嵌套过深，无法完成类型检查",
+                         "把长表达式拆成多条语句")
+                return None
+            return self._check_expr_inner(e)
+        finally:
+            self._expr_depth -= 1
+
+    def _check_expr_inner(self, e) -> Optional[str]:
         if e is None:
             return None
 
@@ -622,9 +719,17 @@ class Analyzer:
                                      "先让它指向有效的内存")
                         return sym.vtype.base
                 return self.check_expr(base)
-            t = self.check_expr(e.operand)
+            # sizeof 在算类型尺寸之前不能调 check_expr(e.operand)：
+            # 操作数可能是类型名（sizeof(int)），当成变量检查会误报 E1。
             if e.op == "sizeof":
+                sz = self.sizeof_node(e.operand)
+                # 把算出的尺寸挂在节点上，供 ir.py 生成真实常量
+                try:
+                    e.size_value = sz
+                except Exception:
+                    pass
                 return "int"
+            t = self.check_expr(e.operand)
             if e.op == "!":
                 return "int"
             return t
@@ -950,6 +1055,85 @@ class Analyzer:
                 node = node.base
                 continue
             break
+
+    # 类型尺寸表（64 位模型，教学用简化，不考虑对齐填充）
+    TYPE_SIZE = {
+        "char": 1, "signed char": 1, "unsigned char": 1,
+        "short": 2, "unsigned short": 2,
+        "int": 4, "unsigned int": 4, "signed int": 4,
+        "long": 8, "unsigned long": 8, "long long": 8,
+        "float": 4, "double": 8,
+        "void": 1,          # GCC 扩展：sizeof(void)==1
+    }
+
+    def sizeof_node(self, node) -> int:
+        """计算 sizeof 操作数的字节数。
+
+        支持三种写法：
+          sizeof(int)          -> 类型名
+          sizeof(x)            -> 变量
+          sizeof(struct S)     -> 结构体
+        算不出时返回 4（保守），绝不崩溃。
+        """
+        # 情形 1：类型名或 struct X（parser 用 Ident 承载）
+        if isinstance(node, Ident):
+            name = node.name
+            if name in self.TYPE_SIZE:
+                return self.TYPE_SIZE[name]
+            if name.startswith("struct "):
+                sd = self.structs.get(name[len("struct "):])
+                return self._sizeof_struct(sd) if sd else 4
+            # 匿名结构体的 typedef 名
+            if name in self.structs:
+                return self._sizeof_struct(self.structs[name])
+            if name in self.typedefs:
+                return self._sizeof_type(self.typedefs[name])
+            # 情形 2：变量名
+            sym = self.scope.lookup(name)
+            if sym is not None:
+                return self._sizeof_type(sym.vtype)
+            return 4
+
+        # 情形 3：其他表达式，先推类型
+        if isinstance(node, UnOp) and node.op == "sizeof":
+            return 8        # sizeof(sizeof(x)) 极少见，按 size_t 宽度
+        return 4
+
+    def _sizeof_type(self, ty) -> int:
+        """按类型算尺寸。数组要乘元素个数。"""
+        if ty is None:
+            return 4
+        base = ty.base or "int"
+        # 指针统一 8 字节
+        if ty.ptr > 0:
+            return 8
+        elem = self.TYPE_SIZE.get(base)
+        if elem is None:
+            if base.startswith("struct "):
+                sd = self.structs.get(base[len("struct "):])
+                elem = self._sizeof_struct(sd) if sd else 4
+            elif base in self.structs:
+                elem = self._sizeof_struct(self.structs[base])
+            elif base in self.typedefs:
+                return self._sizeof_type(self.typedefs[base])
+            else:
+                elem = 4
+        # 数组：元素尺寸 × 第一维长度
+        n = ty.array
+        if n is None and ty.dims:
+            n = ty.dims[0]
+        if isinstance(n, int) and n > 0:
+            return elem * n
+        return elem
+
+    def _sizeof_struct(self, sd) -> int:
+        """结构体尺寸 = 各成员尺寸之和（不考虑对齐填充，教学简化）。"""
+        if sd is None or not sd.members:
+            return 4
+        total = 0
+        for mty, _name in sd.members:
+            total += self._sizeof_type(mty)
+        return total or 4
     def check_lvalue(self, e) -> Optional[str]:
         """左值检查：只验证"这个标识符存不存在"，不检查是否已初始化。
 
@@ -1013,6 +1197,19 @@ class Analyzer:
         name = call.func.name
         fn = self.funcs.get(name)
 
+        # 函数指针变量调用：typedef 出来的类型 base 是 "funcptr"，
+        # 或 typedef 名本身指向函数指针。
+        # 不先认出来，cb(arg) 会被当成"调用未声明的函数 cb"而误报 E5。
+        # 实测：void reg(void (*cb)(void *), void *arg) { cb(arg); }
+        sym_call = self.scope.lookup(name) if fn is None else None
+        if sym_call is not None and sym_call.kind != "func":
+            cty = self.expand_typedef(sym_call.vtype)
+            if cty is not None and (cty.base == "funcptr" or cty.ptr > 0):
+                sym_call.used = True
+                for a in call.args:
+                    self.check_expr(a)
+                return "int"
+
         # 标准库函数：不报未声明，并按其语义检查参数
         if fn is None and name in STD_FUNCS:
             minargs, maxargs, out_mode = STD_FUNCS[name]
@@ -1029,7 +1226,7 @@ class Analyzer:
                 # 用精确索引，不能写成 i >= 2 —— 那会把
                 # WriteFile(..., &dw, NULL) 的 NULL 也当左值报错。
                 is_out = False
-                if out_mode == "varargs_out":
+                if out_mode in ("varargs_out", "needs_addr_out"):
                     is_out = i >= 1
                 elif isinstance(out_mode, int):
                     is_out = i == out_mode
@@ -1038,9 +1235,12 @@ class Analyzer:
                 elif out_mode == "third_out":
                     is_out = i == 2
                 if is_out:
-                    # 输出参数有两种写法：&x（scanf）和裸变量名
-                    # （va_start(argp, var)）。两种都要标记为已初始化，
-                    # 否则后续 va_arg(argp,...) 会被连续误报未初始化。
+                    # 输出参数分两种，语义完全不同：
+                    #   &x    —— scanf 家族：输入项必须是地址表达式
+                    #   裸名   —— va_start(argp, var)：直接写变量
+                    # 早期版本把两种一视同仁地标记为已初始化，结果
+                    # `scanf("%d", v)`（漏写 &）这种高频真实错误被一起吃掉，
+                    # 连"显然传错"都报不出来——宽容反而制造了漏报。
                     if isinstance(a, UnOp) and a.op == "&" \
                             and isinstance(a.operand, Ident):
                         self.check_lvalue(a)
@@ -1048,10 +1248,17 @@ class Analyzer:
                         if sym:
                             sym.initialized = True
                     elif isinstance(a, Ident):
-                        sym = self.scope.lookup(a.name)
-                        if sym is not None:
-                            sym.initialized = True
-                            sym.used = True
+                        # 要求地址的函数收到裸变量名 = 真实错误
+                        if out_mode == "needs_addr_out":
+                            self.err("E16", a.line, a.col,
+                                     f"{name} 的输入参数需要取地址，"
+                                     f"实际传的是变量 {a.name!r}",
+                                     f"应写成 &{a.name}")
+                        else:
+                            sym = self.scope.lookup(a.name)
+                            if sym is not None:
+                                sym.initialized = True
+                                sym.used = True
                     else:
                         self.check_expr(a)
                 else:

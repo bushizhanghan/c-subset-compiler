@@ -263,6 +263,12 @@ class Parser:
         "PyTypeObject", "PyMethodDef", "PyModuleDef", "PyMemberDef",
     }
 
+    # 递归深度上限。C 语法里括号、三目、一元运算都是右/左递归的，
+    # 每层 C 结构要吃好几个 Python 栈帧，几百层就打满默认递归限制，
+    # 表现为 RecursionError 直接崩掉（学生看到 traceback 而不是诊断）。
+    # 超限时报可读的 ParseError，而不是让 Python 抛栈溢出。
+    MAX_NEST_DEPTH = 200
+
     def __init__(self, toks):
         self.toks = toks
         self.i = 0
@@ -271,6 +277,20 @@ class Parser:
         self.known_types = set(self.BUILTIN_TYPEDEFS)
         # 已出现的变量名，用于区分 (var) 和 (TypeName)
         self.known_vars = set()
+        # 当前递归深度，由 enter_nest / leave_nest 维护
+        self._depth = 0
+
+    def enter_nest(self):
+        """进入一层嵌套。超限直接抛可读的解析错误。"""
+        self._depth += 1
+        if self._depth > self.MAX_NEST_DEPTH:
+            t = self.cur
+            raise ParseError(
+                f"嵌套层级过深（超过 {self.MAX_NEST_DEPTH} 层），"
+                f"请简化表达式或拆成多条语句", t.line, t.col)
+
+    def leave_nest(self):
+        self._depth -= 1
 
     # ---- 基础工具 ----
     @property
@@ -606,9 +626,16 @@ class Parser:
                     if pty is None:
                         t = self.cur
                         raise ParseError("参数缺少类型", t.line, t.col)
-                    pname = self.parse_param_name()
+                    pname, extra_ptr = self.parse_param_name()
                     if pname:
                         self.known_vars.add(pname)
+                        # 数组退化 / 函数指针形参都让类型多一层指针。
+                        # 漏掉这一步，cb(arg) 会被误判成"调用未声明的函数"。
+                        if extra_ptr and pty is not None:
+                            pty = Type(base=pty.base,
+                                       ptr=pty.ptr + extra_ptr,
+                                       array=pty.array,
+                                       dims=list(pty.dims))
                     params.append((pty, pname))
                     if self.at(","):
                         self.advance()
@@ -653,12 +680,21 @@ class Parser:
 
     def parse_param_name(self):
         """参数名。可能是 argv[] 这种数组退化，也可能是
-        函数指针 void (*dtor)(void *) 这种形式。"""
+        函数指针 void (*dtor)(void *) 这种形式。
+
+        返回 (名字, 额外指针层数)。函数指针形参必须把"它是指针"
+        这个信息带回去，否则类型记成 void，调用 cb(arg) 时会被
+        误判成"调用未声明的函数"。
+        """
         # 函数指针参数：(*name)(...)
         if self.at("(") and self.peek().value == "*":
             save = self.i
             self.advance()                      # (
             self.advance()                      # *
+            stars = 1
+            while self.at("*"):
+                self.advance()
+                stars += 1
             if self.at_kind(Tok.IDENT) and self.peek().value == ")":
                 pname = self.advance().value
                 self.advance()                  # )
@@ -673,16 +709,18 @@ class Parser:
                                 self.advance()
                                 break
                         self.advance()
-                return pname
+                return (pname, stars)
             self.i = save
         if not self.at_kind(Tok.IDENT):
-            return ""
+            return ("", 0)
         name = self.advance().value
+        extra = 0
         # char *argv[] 里的 [] ：数组形参等价于指针，丢掉维度
         while self.at("[") and self.peek().value == "]":
             self.advance()
             self.advance()
-        return name
+            extra += 1          # 数组退化也等效于加一层指针
+        return (name, extra)
 
     def parse_var_rest(self, vtype, name, name_tok) -> VarDecl:
         """解析单个变量名之后的部分：[数组维度] [= 初值] ; 或 , 后续变量
@@ -705,16 +743,25 @@ class Parser:
                     dim = None
                 self.advance()
             elif not self.at("]"):
-                # 常量表达式或未知宏（MAX_PATH + 1）：跳过，记未知
-                depth = 0
-                while not self.at_kind(Tok.EOF):
-                    if self.at("["):
-                        depth += 1
-                    elif self.at("]"):
-                        if depth == 0:
-                            break
-                        depth -= 1
-                    self.advance()
+                # 常量表达式：2 * 3、N/2、MAX_PATH + 1 等。
+                # 解析成 AST 后尽量折成常量；折不出来（含未知宏）才记 None。
+                # 早期版本这里直接跳过不解析，导致 a[2*3] 这种
+                # 明明可以算出长度的数组，越界检查完全失效。
+                try:
+                    dim_expr = self.parse_assign()
+                    dim = _fold_const_dim(dim_expr)
+                except Exception:
+                    dim = None
+                    # 解析失败则保守跳过，保证不因为维度写法特殊而崩
+                    depth = 0
+                    while not self.at_kind(Tok.EOF):
+                        if self.at("["):
+                            depth += 1
+                        elif self.at("]"):
+                            if depth == 0:
+                                break
+                            depth -= 1
+                        self.advance()
             self.expect("]")
             dims.append(dim)
         if dims:
@@ -819,6 +866,13 @@ class Parser:
         return Block(line=0, col=0, stmts=cases)
 
     def parse_block(self) -> Block:
+        self.enter_nest()
+        try:
+            return self._parse_block_inner()
+        finally:
+            self.leave_nest()
+
+    def _parse_block_inner(self) -> Block:
         lb = self.expect("{")
         blk = Block(line=lb.line, col=lb.col)
         while not self.at("}"):
@@ -829,6 +883,13 @@ class Parser:
         return blk
 
     def parse_stmt(self):
+        self.enter_nest()
+        try:
+            return self._parse_stmt_inner()
+        finally:
+            self.leave_nest()
+
+    def _parse_stmt_inner(self):
         t = self.cur
 
         # goto 标签：标识符后面紧跟冒号。
@@ -972,6 +1033,13 @@ class Parser:
 
     def parse_ternary(self):
         """三目运算符 cond ? a : b，右结合，优先级低于所有二元运算。"""
+        self.enter_nest()
+        try:
+            return self._parse_ternary_inner()
+        finally:
+            self.leave_nest()
+
+    def _parse_ternary_inner(self):
         cond = self.parse_binary(1)
         if self.at("?"):
             q = self.advance()
@@ -1023,6 +1091,13 @@ class Parser:
         return self.parse_postfix()
 
     def parse_postfix(self):
+        self.enter_nest()
+        try:
+            return self._parse_postfix_inner()
+        finally:
+            self.leave_nest()
+
+    def _parse_postfix_inner(self):
         e = self.parse_primary()
         while True:
             t = self.cur
@@ -1069,6 +1144,13 @@ class Parser:
         return e
 
     def parse_primary(self):
+        self.enter_nest()
+        try:
+            return self._parse_primary_inner()
+        finally:
+            self.leave_nest()
+
+    def _parse_primary_inner(self):
         t = self.cur
         if self.at("{"):
             # 初始化列表 {1, 2, 3} 或 {INVALID_HANDLE_VALUE, ""}
@@ -1101,10 +1183,15 @@ class Parser:
             self.advance()
             v = t.value
             if v.lower().startswith("0x"):
-                return Num(line=t.line, col=t.col, value=int(v, 16))
+                return Num(line=t.line, col=t.col, value=_safe_int(v, 16))
             if "." in v or "e" in v.lower():
-                return Num(line=t.line, col=t.col, value=float(v), is_float=True)
-            return Num(line=t.line, col=t.col, value=int(v))
+                try:
+                    return Num(line=t.line, col=t.col, value=float(v),
+                               is_float=True)
+                except (ValueError, OverflowError):
+                    return Num(line=t.line, col=t.col, value=0.0,
+                               is_float=True)
+            return Num(line=t.line, col=t.col, value=_safe_int(v, 10))
         if t.kind == Tok.STR:
             self.advance()
             # C 里相邻字符串字面量会自动拼接："abc" "def" == "abcdef"
@@ -1212,3 +1299,64 @@ def _looks_like_type_name(name: str) -> bool:
     if not (name[0].isalpha() or name[0] == "_"):
         return False
     return all(ch.isalnum() or ch == "_" for ch in name)
+
+def _fold_const_dim(node):
+    """把数组长度表达式折成整数常量，折不出返回 None。
+
+    只做纯常量折叠（字面量 + 算术/位运算），不依赖语义层的符号表——
+    维度里通常只有数字和宏，出现变量名就放弃（返回 None）。
+    """
+    if isinstance(node, Num) and not node.is_float:
+        try:
+            return int(node.value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(node, UnOp) and node.op in ("-", "+"):
+        v = _fold_const_dim(node.operand)
+        if v is None:
+            return None
+        return -v if node.op == "-" else v
+    if isinstance(node, BinOp):
+        a = _fold_const_dim(node.left)
+        b = _fold_const_dim(node.right)
+        if a is None or b is None:
+            return None
+        try:
+            if node.op == "+": return a + b
+            if node.op == "-": return a - b
+            if node.op == "*": return a * b
+            if node.op == "/": return int(a / b) if b else None
+            if node.op == "%": return a % b if b else None
+            if node.op == "<<": return a << b if 0 <= b < 64 else None
+            if node.op == ">>": return a >> b if 0 <= b < 64 else None
+            if node.op == "&": return a & b
+            if node.op == "|": return a | b
+            if node.op == "^": return a ^ b
+        except (ZeroDivisionError, ValueError, OverflowError):
+            return None
+    return None
+
+# Python 3.11+ 默认限制整数转字符串/字符串转整数为 4300 位。
+# 学生写错一个超长数字（粘贴错误、多打几个 0）就会让整个工具崩掉，
+# 而这时候最需要的是"给出诊断"而不是 traceback。
+_MAX_INT_DIGITS = 4000
+
+
+def _safe_int(text, base=10):
+    """安全地把字面量转成 int。超长时截断并给一个保守值。
+
+    C 里整数字面量超过类型范围是未定义行为/实现定义，
+    教学工具没必要真算出那个天文数字，只要不崩就行。
+    这里超长时返回首段数字的值——保持符号和量级大致正确，
+    并让 const_fold 之类下游逻辑仍然拿到一个 int。
+    """
+    body = text
+    if base == 16 and body.lower().startswith("0x"):
+        body = body[2:]
+    body = body.lstrip("+-")
+    if len(body) > _MAX_INT_DIGITS:
+        body = body[:_MAX_INT_DIGITS]
+    try:
+        return int(text[:1] + body if text[:1] in "+-" else body, base)
+    except (ValueError, OverflowError):
+        return 0
