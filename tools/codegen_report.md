@@ -55,8 +55,13 @@
 | p45_float_div | 3 | 3 | 一致 |  |
 | p46_float_compare | 10 | 10 | 一致 |  |
 | p47_float_in_loop | 6 | 6 | 一致 |  |
+| p48_struct_basic | 3 | 3 | 一致 |  |
+| p49_struct_read | 42 | 42 | 一致 |  |
+| p50_struct_ptr | 7 | 7 | 一致 |  |
+| p51_struct_three | 123 | 123 | 一致 |  |
+| p52_struct_printf | 0 | 0 | 一致 |  |
 
-合计：47/47 一致。
+合计：52/52 一致。
 
 ## 后端实现要点
 

@@ -394,6 +394,17 @@ class IRGen:
                 p = self.gen_expr(e.target.operand)
                 self.emit("store", a1="0", a2=v, extra=p, line=e.line)
                 return v
+            if isinstance(e.target, Member):
+                # 结构体成员赋值：p.x = 1 / q->x = 1
+                # 早期这里落到最后的 return v，赋值被整个丢掉——
+                # 生成的 IR 里根本没有这条指令（实测 struct P p; p.x=1;
+                # 的 IR 只剩 return p.x，赋值凭空消失）。
+                # 现在生成 setmem 指令，把"结构体基址+成员名"作为
+                # 两个操作数传下去，具体偏移由后端按类型布局算。
+                base = self.gen_expr(e.target.base)
+                self.emit("setmem", a1=v, a2=e.target.name,
+                          extra=base, line=e.line)
+                return v
             return v
 
         if isinstance(e, Call):
@@ -412,8 +423,14 @@ class IRGen:
             return t
 
         if isinstance(e, Member):
+            # 结构体成员读取：p.x / q->x
+            # 早期直接返回 "p.x" 这种拼接字符串当操作数，后端拿不到
+            # 内存布局只能报错。现在生成 getmem 指令：把结构体基址
+            # 和成员名分开传，后端按类型算偏移。
             base = self.gen_expr(e.base)
-            return f"{base}.{e.name}"
+            t = self.newtmp()
+            self.emit("getmem", dst=t, a1=e.name, extra=base, line=e.line)
+            return t
 
         if isinstance(e, Ternary):
             # a ? b : c —— 用条件跳转实现，两个分支都汇到同一个临时变量。

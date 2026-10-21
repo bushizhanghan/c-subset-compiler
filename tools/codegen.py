@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from parser import (                                     # noqa: E402
     parse, ParseError, Program, FuncDef, VarDecl, DeclGroup, Block, If,
     While, For, Return, Break, Continue, ExprStmt, DoWhile, Switch, Case,
-    Label, Goto, Type,
+    Label, Goto, Type, StructDef,
 )
 from semantic import analyze, const_int                  # noqa: E402
 from ir import IRGen, const_fold, dead_code_elim          # noqa: E402
@@ -210,6 +210,66 @@ def collect_types(prog):
     return types, globals_
 
 
+def collect_structs(prog):
+    """收集结构体布局：类型名 -> {成员名: (偏移, 字节数, 是否指针)}。
+
+    教学后端用**简单布局**：按声明顺序紧密排列，不插入对齐填充。
+    与真实 ABI 不完全一致（gcc 会对齐到成员宽度），但：
+      - 对"全是 int 的结构体"完全一致
+      - 对混合宽度（char + int）会偏小，但同一次编译里读写都用
+        同一套偏移，程序自身是自洽的
+    这一点在报告里明确标注为"教学简化，不是完整 ABI"。
+    """
+    structs = {}
+
+    def layout(sd):
+        members = getattr(sd, "members", None) or []
+        off = 0
+        table = {}
+        for mty, mname in members:
+            size = _type_size(mty)
+            table[mname] = (off, size, getattr(mty, "ptr", 0) > 0)
+            off += size
+        return table, off
+
+    def walk_decls(items):
+        for d in items:
+            if isinstance(d, StructDef):
+                tag = getattr(d, "tag", "") or ""
+                if tag:
+                    table, total = layout(d)
+                    structs[tag] = {"members": table, "size": total}
+            elif isinstance(d, DeclGroup):
+                walk_decls(d.decls)
+
+    walk_decls(prog.decls)
+    return structs
+
+
+def _type_size(ty):
+    """一个类型占多少字节（教学简化，不做对齐）。"""
+    if ty is None:
+        return 4
+    if getattr(ty, "ptr", 0):
+        return 8
+    base = (ty.base or "int").replace("struct ", "")
+    if getattr(ty, "dims", None) or getattr(ty, "array", None):
+        n = 1
+        dims = list(getattr(ty, "dims", None) or [])
+        if getattr(ty, "array", None):
+            dims.insert(0, ty.array)
+        for d in dims:
+            if isinstance(d, int) and d > 0:
+                n *= d
+        return n * _scalar_size(base)
+    return _scalar_size(base)
+
+
+def _scalar_size(base):
+    return {"char": 1, "short": 2, "int": 4,
+            "long": 8, "float": 4, "double": 8}.get(base, 4)
+
+
 def _is_array(ty):
     if ty is None:
         return False
@@ -276,6 +336,12 @@ class FuncGen:
                     if _is_name(a):
                         names.append(a)
             if ins.op == "store" and ins.extra and _is_name(ins.extra):
+                names.append(ins.extra)
+            # getmem / setmem 的结构体基址在 extra 里，
+            # 不扫的话结构体变量根本不会分配栈槽，
+            # 后面 lea_base 查不到就报"未知变量"（实测踩到）。
+            if ins.op in ("getmem", "setmem") and ins.extra \
+                    and _is_name(ins.extra):
                 names.append(ins.extra)
         for p in self.param_names():
             names.append(p)
@@ -347,6 +413,16 @@ class FuncGen:
         off = 0
         for n in names:
             ty = self.types.get(n)
+            # 结构体变量要按布局大小分配，不能只给 8 字节
+            _lay, _deref = self._struct_layout_of_type(ty)
+            if _lay is not None and not _deref:
+                nbytes = _lay["size"]
+                off += nbytes
+                off = (off + 7) // 8 * 8
+                self.slots[n] = off
+                self.kinds[n] = "struct"
+                self.sizes[n] = nbytes
+                continue
             if _is_array(ty):
                 nbytes = _array_len(ty) * _elem_size(ty)
                 nbytes = max(nbytes, _elem_size(ty))
@@ -471,6 +547,9 @@ class FuncGen:
         if self.kinds[name] == "ptr":
             self.line(f"mov {reg}, QWORD PTR [rbp-{off}]")
         else:
+            # array / scalar / struct 都是取栈上地址。
+            # 结构体：slots[n] 存的是它占用的末地址，
+            # 基址就是 [rbp-off]（成员按正偏移往上加）。
             self.line(f"lea {reg}, [rbp-{off}]")
 
     # ---- 指令 ----
@@ -637,9 +716,15 @@ class FuncGen:
         if op == "load":
             self.gen_load(ins)
             return
-
         if op == "store":
             self.gen_store(ins)
+            return
+
+        if op == "getmem":
+            self.gen_getmem(ins)
+            return
+        if op == "setmem":
+            self.gen_setmem(ins)
             return
 
         if op == "addr":
@@ -854,6 +939,84 @@ class FuncGen:
             self._str_data.append((label, body))
         return self._str_pool[body]
 
+    def _struct_of(self, name):
+        """查一个变量/指针对应的结构体布局表。
+
+        可能是指针（q->x），要剥一层；返回 (布局表, 是否需解引用)。
+        """
+        return self._struct_layout_of_type(self.types.get(name))
+
+    def _struct_layout_of_type(self, ty):
+        """按类型查结构体布局，返回 (lay, deref) 或 (None, False)。"""
+        if ty is None:
+            return None, False
+        base = (ty.base or "")
+        if base.startswith("struct "):
+            tag = base[len("struct "):]
+        elif base in self.structs:
+            tag = base
+        else:
+            return None, False
+        lay = self.structs.get(tag)
+        if lay is None:
+            return None, False
+        return lay, getattr(ty, "ptr", 0) > 0
+
+    def gen_getmem(self, ins):
+        """结构体成员读取：t = p.x / t = q->x"""
+        memname = ins.a1
+        basename = ins.extra
+        lay, deref = self._struct_of(basename)
+        if lay is None:
+            raise CodegenError(
+                f"函数 {self.name}: 读成员 {basename}.{memname} 时"
+                f"找不到结构体布局（类型未知）")
+        info = lay["members"].get(memname)
+        if info is None:
+            raise CodegenError(
+                f"函数 {self.name}: 结构体没有成员 {memname!r}")
+        off, size, is_ptr = info
+        # 取基址
+        if deref:
+            # q->x：q 里存的是地址
+            self.load_operand("rdx", basename)
+        else:
+            # p.x：p 本身在栈上，取它的地址
+            self.lea_base("rdx", basename)
+        if size == 1:
+            self.line(f"movzx eax, BYTE PTR [rdx+{off}]")
+        elif size == 8 and is_ptr:
+            self.line(f"mov rax, QWORD PTR [rdx+{off}]")
+        else:
+            self.line(f"mov eax, DWORD PTR [rdx+{off}]")
+        self.store_reg(ins.dst)
+
+    def gen_setmem(self, ins):
+        """结构体成员写入：p.x = v / q->x = v"""
+        value = ins.a1
+        memname = ins.a2
+        basename = ins.extra
+        lay, deref = self._struct_of(basename)
+        if lay is None:
+            raise CodegenError(
+                f"函数 {self.name}: 写成员 {basename}.{memname} 时"
+                f"找不到结构体布局（类型未知）")
+        info = lay["members"].get(memname)
+        if info is None:
+            raise CodegenError(
+                f"函数 {self.name}: 结构体没有成员 {memname!r}")
+        off, size, is_ptr = info
+        if deref:
+            self.load_operand("rdx", basename)
+        else:
+            self.lea_base("rdx", basename)
+        if size == 8 and is_ptr:
+            self.load_operand("rax", value)
+            self.line(f"mov QWORD PTR [rdx+{off}], rax")
+        else:
+            self.load_operand("eax", value)
+            self.line(f"mov DWORD PTR [rdx+{off}], eax")
+
     def gen_load(self, ins):
         base, idx = ins.a1, ins.a2
         if not _is_name(base):
@@ -981,6 +1144,7 @@ def generate_asm(prog, optimize=False, verbose=False):
             print(f"[codegen] 常量折叠 {folded} 处，死代码 {removed} 条",
                   file=sys.stderr)
     types, globals_ = collect_types(prog)
+    structs = collect_structs(prog)
     funcs, global_inits = split_functions(code)
 
     # 全局变量：早期直接拒绝（"全局变量不进 IR，后端不支持"）。
@@ -1014,6 +1178,7 @@ def generate_asm(prog, optimize=False, verbose=False):
         fg = FuncGen(name, instrs, types, globals_)
         fg._params = [p for p in _params_of(prog, name)]
         fg.global_names = global_names
+        fg.structs = structs
         fg.alloc()
         out.extend(fg.gen())
         # 收集本函数用到的字符串字面量（跨函数去重）
@@ -1446,6 +1611,48 @@ int main() {
     int i = 0;
     for (i = 0; i < 4; i = i + 1) { s = s + 1.5f; }
     return (int)s;
+}"""),
+    # ---- 结构体（p48..p52）----
+    # IR 新增 getmem / setmem 两条指令：把"结构体基址 + 成员名"
+    # 分开传，偏移由后端按布局算。
+    # 踩到的坑：
+    #   1. Assign 早期只处理 Ident/Index/*p 三种目标，Member 落到
+    #      return v，p.x = 1 这类赋值被整个丢弃（IR 里根本没有指令）
+    #   2. scan_symbols 不扫 getmem/setmem 的 extra，结构体变量
+    #      分不到栈槽，后面报"未知变量"
+    # 布局用紧密排列（不做对齐填充），教学简化，报告里标注了。
+    ("p48_struct_basic", """struct P { int x; int y; };
+int main() {
+    struct P p;
+    p.x = 1; p.y = 2;
+    return p.x + p.y;
+}"""),
+    ("p49_struct_read", """struct P { int x; };
+int main() {
+    struct P p;
+    p.x = 42;
+    return p.x;
+}"""),
+    ("p50_struct_ptr", """struct P { int x; };
+int main() {
+    struct P p;
+    struct P *q = &p;
+    q->x = 7;
+    return q->x;
+}"""),
+    ("p51_struct_three", """struct P { int a; int b; int c; };
+int main() {
+    struct P p;
+    p.a = 1; p.b = 2; p.c = 3;
+    return p.a * 100 + p.b * 10 + p.c;
+}"""),
+    ("p52_struct_printf", """#include <stdio.h>
+struct P { int x; int y; };
+int main() {
+    struct P p;
+    p.x = 3; p.y = 4;
+    printf("sum=%d\\n", p.x + p.y);
+    return 0;
 }"""),
 ]
 
