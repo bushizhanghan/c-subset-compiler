@@ -451,6 +451,13 @@ class Symbol:
     col: int = 0
     # 数组常量下标的历史访问记录，用于越界判断
     const_indices: list = field(default_factory=list)
+    # 声明所在的作用域深度。用于检测「块作用域逃逸」：
+    # 把 &inner（深度 2）赋给外层的指针 p（深度 1），
+    # 出块后 inner 已销毁，p 变成悬垂指针。
+    scope_depth: int = 0
+    # 数组是否有任何元素被写过（W21 读未初始化元素用）。
+    # None 表示不是数组或不追踪。
+    array_written: bool = True
 
 
 class Scope:
@@ -498,6 +505,8 @@ class Analyzer:
         # 已报过 E2 的变量（函数名, 声明行, 声明列）：
         # 同一变量只报一次，避免循环里刷屏
         self._reported_e2 = set()
+        # 当前作用域深度，用于块作用域逃逸检测（W20）
+        self._scope_depth = 0
 
     # ---- 工具 ----
     def err(self, code, line, col, msg, hint=""):
@@ -507,6 +516,7 @@ class Analyzer:
         self.diags.append(Diag("warning", code, line, col, msg, hint))
 
     def push(self):
+        self._scope_depth += 1
         self.scope = Scope(self.scope)
 
     def pop(self):
@@ -527,6 +537,7 @@ class Analyzer:
                           f"变量 {s.name!r} 声明后从未使用",
                           "删掉它，或确认是否忘了使用")
         self.scope = self.scope.parent
+        self._scope_depth -= 1
 
     # ---- 入口 ----
     def analyze(self, prog: Program) -> list:
@@ -755,7 +766,8 @@ class Analyzer:
         is_global = self.scope is self.globals
         sym = Symbol(name=vd.name, vtype=vd.vtype, kind="var",
                      line=vd.line, col=vd.col,
-                     initialized=is_global)
+                     initialized=is_global,
+                     scope_depth=0 if is_global else self._scope_depth)
         if vd.init is not None:
             t = self.check_expr(vd.init)
             sym.initialized = True
@@ -767,6 +779,11 @@ class Analyzer:
             # 注意要同时看 dims：维度写成常量表达式（MAX_PATH + 1）时
             # array 是 None，但 dims 有值。只看 array 会漏掉这种。
             sym.initialized = True
+            # 但"整体可读"不等于"真的写过任何元素"。W21 要的是后者：
+            # int a[4]; printf("%d", a[2]); 是真实高频错误（err_15），
+            # 而这里的 initialized=True 会让它完全查不出来。
+            # 单独用一个标记记录"是否有任何元素被写过"。
+            sym.array_written = False
         self.scope.declare(sym)
 
     def check_assign_compat(self, target: Type, src, node, name: str,
@@ -1269,6 +1286,8 @@ class Analyzer:
                 sym = self.scope.lookup(e.target.name)
                 if sym:
                     sym.initialized = True
+            # W20：块作用域逃逸
+            self._check_scope_escape(e)
             # 复合赋值（+= -= ...）的"目标类型"不是左值类型：
             # p += 1 在 C 里就是指针加，属于合法写法。
             if e.op == "=" and tt is not None:
@@ -1285,6 +1304,8 @@ class Analyzer:
             self.check_oob(e, "read")
             # W16：循环内的 arr[i] 区间越界（off-by-one）
             self._check_index_range(e)
+            # W21：读了从未写过任何元素的数组
+            self._check_uninit_array_read(e)
             return self.index_type(bt)
 
         if isinstance(e, InitList):
@@ -2192,6 +2213,79 @@ class Analyzer:
             # 只看第一层，遇不到标准形态就放弃
         return None
 
+    def _check_uninit_array_read(self, e):
+        """W21：读一个从未写过任何元素的局部数组。
+
+            int a[4];               // 没有任何元素被赋值
+            printf("%d", a[2]);     // 读到的是栈上残留的垃圾值
+
+        gcc 完全不报（它不追踪元素级初始化）。
+
+        保守规则，只在确凿时报：
+          - 必须是局部数组（全局数组零初始化，安全）
+          - 必须没有任何元素被写过（array_written 仍为 False）
+          - 必须是读，不是写（写路径走 check_lvalue，不调这里）
+          - 数组作为整体传给函数时不算（那可能被函数写入）
+        """
+        if not isinstance(e.base, Ident):
+            return
+        sym = self.scope.lookup(e.base.name)
+        if sym is None or sym.vtype is None:
+            return
+        vt = sym.vtype
+        if vt.array is None and not vt.dims:
+            return                    # 不是数组
+        if sym.scope_depth <= 0:
+            return                    # 全局数组零初始化
+        if getattr(sym, "array_written", True):
+            return                    # 已经有元素被写过
+        # 检查是不是同一行内的自我赋值（a[0]=a[0] 这种退化情况）
+        self.warn("W21", e.line, e.col,
+                  f"数组 {e.base.name!r} 从未被赋值就读取元素，"
+                  f"读到的是栈上残留的垃圾值",
+                  "先初始化元素（循环赋值，或声明时写 = {...}）")
+
+    def _check_scope_escape(self, e):
+        """W20：把内层块的局部变量地址赋给外层指针 → 出块后悬垂。
+
+            int *p = 0;
+            {
+                int inner = 7;
+                p = &inner;      // inner 在这个 } 就死了
+            }
+            printf("%d", *p);    // p 指向已销毁的栈内存
+
+        判据：赋值右侧是 &内层变量，左侧指针的声明作用域比它更浅。
+        只报「&裸变量名」的形态，&a[i]、&s.member 这些不查
+        （数组/结构体成员的生命周期判定更复杂，保守起见不做）。
+        """
+        if e.op != "=":
+            return
+        rhs = e.value
+        if not (isinstance(rhs, UnOp) and rhs.op == "&"
+                and isinstance(rhs.operand, Ident)):
+            return
+        inner = self.scope.lookup(rhs.operand.name)
+        if inner is None:
+            return
+        if inner.kind == "param":
+            return                    # 形参指向调方的对象，生命周期更长
+        # 内层变量必须是局部自动变量，且不在全局作用域
+        if inner.scope_depth <= 0:
+            return                    # 全局/static，一直有效
+        # 左侧指针的作用域
+        if not isinstance(e.target, Ident):
+            return
+        outer = self.scope.lookup(e.target.name)
+        if outer is None or outer.scope_depth <= 0:
+            return                    # 目标是全局指针，写得进去就是错的，但不在此查
+        if outer.scope_depth < inner.scope_depth:
+            self.warn("W20", e.line, e.col,
+                      f"把内层变量 {rhs.operand.name!r} 的地址赋给外层指针 "
+                      f"{e.target.name!r}：出块后该地址失效",
+                      "让变量的生命周期覆盖指针的使用范围，"
+                      "或改用 malloc 分配")
+
     def check_lvalue(self, e):
         """左值检查：只验证"这个标识符存不存在"，不检查是否已初始化。
 
@@ -2228,6 +2322,11 @@ class Analyzer:
             self.check_oob(e, "write")
             # W16：循环内写入 arr[i] 的区间越界
             self._check_index_range(e)
+            # 标记数组"有元素被写过"，供 W21 判断
+            if isinstance(e.base, Ident):
+                sym = self.scope.lookup(e.base.name)
+                if sym is not None:
+                    sym.array_written = True
             return self.index_type(bt)
         if isinstance(e, UnOp) and e.op == "*":
             t = self.check_expr(e.operand)
@@ -2387,6 +2486,12 @@ class Analyzer:
                             self.check_expr(a)
                             if sym is not None:
                                 sym.initialized = True
+                                # scanf 家族明确是输出参数，传进去的数组
+                                # 会被写入。不标记的话 W21 会误报
+                                # "数组从未被赋值就读取"（实测 stu_11：
+                                # scanf("%20s", a) 之后读 a[i] 被误判）。
+                                if out_mode == "needs_addr_out":
+                                    sym.array_written = True
                         elif out_mode == "needs_addr_out":
                             self.err("E16", a.line, a.col,
                                      f"{name} 的输入参数需要取地址，"

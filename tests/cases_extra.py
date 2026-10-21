@@ -484,3 +484,86 @@ int main() {
 }
 """, set()),
 ]
+
+
+# ---- W20 块作用域逃逸 / W21 读未初始化数组 ----
+# 每条规则都必须配反向用例：只测"该报的能报"等于没测，
+# E16 那次误报（scanf 传数组名被判成漏写 &）就是只有正向用例
+# 才一路溜过全绿的。
+EXTRA_CASES += [
+    # W20 正向：内层变量的地址被带到块外
+    ("warn_block_scope_escape", """
+int main() {
+    int *p = 0;
+    {
+        int inner = 7;
+        p = &inner;
+    }
+    printf("%d", *p);
+    return 0;
+}
+""", {"W20"}),
+
+    # W20 反向：同作用域取地址，指针和对象同生命周期
+    ("ok_addr_same_scope", """
+int main() {
+    int x = 1;
+    int *p = &x;
+    return *p;
+}
+""", set()),
+
+    # W20 反向：外层变量的地址传给内层指针，安全
+    ("ok_outer_addr_to_inner", """
+int main() {
+    int x = 1;
+    {
+        int *p = &x;
+        printf("%d", *p);
+    }
+    return 0;
+}
+""", set()),
+
+    # W21 正向：数组一个元素都没写过就读
+    ("warn_uninit_array_read", """
+int main() {
+    int a[4];
+    printf("%d", a[2]);
+    return 0;
+}
+""", {"W21"}),
+
+    # W21 反向：循环赋值后读，安全
+    ("ok_array_written_in_loop", """
+int main() {
+    int a[4];
+    int i;
+    for (i = 0; i < 4; i = i + 1) { a[i] = i; }
+    return a[2];
+}
+""", set()),
+
+    # W21 反向：初始化列表后读，安全
+    ("ok_array_init_list", """
+int main() {
+    int a[3] = {1, 2, 3};
+    return a[1];
+}
+""", set()),
+
+    # W21 反向：全局数组零初始化，安全
+    ("ok_global_array_read", """
+int a[4];
+int main() { return a[2]; }
+""", set()),
+
+    # W21 反向：scanf 写入数组后读，安全（stu_11 撞出的误报）
+    ("ok_scanf_fills_array", """
+int main() {
+    char s[10];
+    scanf("%9s", s);
+    return s[0];
+}
+""", set()),
+]
