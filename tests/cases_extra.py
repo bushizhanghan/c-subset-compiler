@@ -706,3 +706,129 @@ int inc(int v) { return v + 1; }
 int main() { int x = 1; x += inc(x); return x; }
 """, set()),
 ]
+
+
+# ---- W23 格式串与参数类型不匹配 ----
+# 来源：老师在 stu_12（质因数分解）里标了两次这类错误。
+# gcc 的 -Wformat 默认不开，所以两个编译器都放行。
+#
+# 关键实现细节：long/long long 的 base 被 parser 归一化成 int，
+# 必须靠 Type/VT 的 long_flag 还原。不传这个信息的话，
+# `long long n; scanf("%d",&n)` 会被判成"类型匹配"而漏报。
+EXTRA_CASES += [
+    # 应报
+    ("warn_fmt_d_longlong", """
+int main() {
+    long long n;
+    scanf("%d", &n);
+    return 0;
+}
+""", {"W23"}),
+
+    ("warn_fmt_printf_d_longlong", """
+int main() {
+    long long n = 1;
+    printf("%d", n);
+    return 0;
+}
+""", {"W23"}),
+
+    ("warn_fmt_lld_int", """
+int main() {
+    int n;
+    scanf("%lld", &n);
+    return 0;
+}
+""", {"W23"}),
+
+    ("warn_fmt_f_int", """
+int main() {
+    int x = 1;
+    printf("%f", x);
+    return 0;
+}
+""", {"W23"}),
+
+    ("warn_fmt_d_double", """
+int main() {
+    double d = 1.5;
+    printf("%d", d);
+    return 0;
+}
+""", {"W23"}),
+
+    # 反向（不该报）
+    ("ok_fmt_d_int", """
+int main() {
+    int n;
+    scanf("%d", &n);
+    return n;
+}
+""", set()),
+
+    ("ok_fmt_lld_longlong", """
+int main() {
+    long long n;
+    scanf("%lld", &n);
+    return (int)n;
+}
+""", set()),
+
+    ("ok_fmt_s_array", """
+int main() {
+    char s[10];
+    scanf("%9s", s);
+    return s[0];
+}
+""", set()),
+
+    ("ok_fmt_f_float", """
+int main() {
+    float f = 1.5f;
+    printf("%f", f);
+    return 0;
+}
+""", set()),
+
+    ("ok_fmt_d_char", """
+int main() {
+    char c = 65;
+    printf("%d", c);
+    return 0;
+}
+""", set()),
+
+    ("ok_fmt_multi", """
+int main() {
+    int a = 1;
+    float b = 2.0f;
+    printf("%d %f", a, b);
+    return 0;
+}
+""", set()),
+
+    ("ok_fmt_percent_escape", """
+int main() {
+    printf("100%%\\n");
+    return 0;
+}
+""", set()),
+
+    ("ok_fmt_width", """
+int main() {
+    int a = 1;
+    printf("%5d", a);
+    return 0;
+}
+""", set()),
+
+    # 未知 typedef 不报（npy_int / DWORD 这类真实宽度看不到）
+    ("ok_fmt_unknown_typedef", """
+typedef int npy_int;
+int main() {
+    npy_int v = 1;
+    printf("%d", v);
+    return 0;
+}
+""", set()),
+]

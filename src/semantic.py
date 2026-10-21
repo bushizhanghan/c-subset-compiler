@@ -290,14 +290,20 @@ class VT(str):
 
     这些信息以前在表达式层全部丢掉，只剩一个 base 字符串。
     """
-    __slots__ = ("ptr", "array", "unsigned", "dims")
+    __slots__ = ("ptr", "array", "unsigned", "dims", "long_flag")
 
-    def __new__(cls, base="int", ptr=0, array=None, unsigned=False, dims=()):
+    def __new__(cls, base="int", ptr=0, array=None, unsigned=False,
+                dims=(), long_flag=False):
         self = super().__new__(cls, base)
         self.ptr = ptr
         self.array = array
         self.unsigned = unsigned
         self.dims = tuple(dims or ())
+        # long / long long 标记。parser 把它们的 base 归一化成 int，
+        # 但 %d / %lld 的格式串检查（W23）和溢出范围判断都靠它区分。
+        # 不传这个信息，`long long n; scanf("%d", &n);` 查不出来
+        # （实测 stu_12 老师标了两次这类错误）。
+        self.long_flag = long_flag
         return self
 
     def text(self) -> str:
@@ -328,7 +334,8 @@ def _vt_of_type(ty, decay: bool = True):
     return VT(base, ptr=ptr,
               array=ty.array if is_arr else None,
               unsigned=bool(getattr(ty, "unsigned", False)),
-              dims=tuple(ty.dims or ()))
+              dims=tuple(ty.dims or ()),
+              long_flag=bool(getattr(ty, "long_flag", False)))
 
 
 def _is_plain(vt, name=None) -> bool:
@@ -2618,6 +2625,175 @@ class Analyzer:
             return node.name
         return "该位置"
 
+    # printf/scanf 家族的格式符与参数类型对应表。
+    # 值 = 可接受的基类型集合（不含指针判断）
+    FMT_SPECS = {
+        "d": ({"int", "char"}, False),
+        "i": ({"int", "char"}, False),
+        "u": ({"int", "char"}, False),
+        "c": ({"int", "char"}, False),
+        "x": ({"int", "char"}, False),
+        "X": ({"int", "char"}, False),
+        "o": ({"int", "char"}, False),
+        "ld": ({"long"}, False),
+        "lu": ({"long"}, False),
+        "lld": ({"long", "long long"}, False),
+        "llu": ({"long", "long long"}, False),
+        "hd": ({"short", "int", "char"}, False),
+        "hu": ({"short", "int", "char"}, False),
+        "f": ({"float", "double"}, False),
+        "lf": ({"float", "double"}, False),
+        "e": ({"float", "double"}, False),
+        "g": ({"float", "double"}, False),
+        "s": ({"char"}, True),
+        "p": (None, True),
+    }
+
+    _SCANF_FAMILY = ("scanf", "sscanf", "fscanf")
+
+    def _check_format_args(self, fname, call):
+        """W23：printf/scanf 的格式串与实参类型不匹配。
+
+            long long n;
+            scanf("%d", &n);        // %d 要 int，给了 long long
+            printf("%d", n);        // 同上
+
+        这是真实高频错误：一位老师在一份作业里标了两次（stu_12）。
+        两个编译器都不报——gcc 的 -Wformat 默认不开。
+
+        保守规则：
+          - 只查 printf/scanf 家族
+          - 只查格式串是**字面量**的情形（运行时拼接的查不了）
+          - 参数个数不够就跳过
+          - %p 不判类型
+        """
+        if fname not in ("printf", "fprintf", "sprintf", "snprintf",
+                         "scanf", "sscanf", "fscanf"):
+            return
+        if not call.args:
+            return
+        # 格式串位置：fprintf/fscanf/sscanf 前面还有 FILE*/buf
+        fmt_idx = 0
+        if fname in ("fprintf", "sprintf", "snprintf",
+                     "fscanf", "sscanf"):
+            fmt_idx = 1
+        if len(call.args) <= fmt_idx:
+            return
+        fmt_node = call.args[fmt_idx]
+        if not isinstance(fmt_node, Str):
+            return
+        specs = self._parse_fmt_specs(fmt_node.value)
+        if not specs:
+            return
+        is_scan = fname in self._SCANF_FAMILY
+        rest = call.args[fmt_idx + 1:]
+        for k, (spec, wants_ptr) in enumerate(specs):
+            if k >= len(rest):
+                break
+            info = self.FMT_SPECS.get(spec)
+            if info is None:
+                continue
+            want, _unused = info
+            if want is None:
+                continue                 # %p 不判
+            arg = rest[k]
+            # scanf 的参数一般写成 &x，剥一层再取类型
+            node = arg
+            if is_scan and isinstance(arg, UnOp) and arg.op == "&":
+                node = arg.operand
+            vt = self._vt_silent(node)
+            if vt is None:
+                continue
+            base = str(vt).replace("struct ", "")
+            # long/long long 的 base 被 parser 归一化成 int，
+            # 靠 long_flag 还原，否则 %lld 配 long long 会误判。
+            if getattr(vt, "long_flag", False):
+                base = "long"
+            # 未知的 typedef（npy_int / size_t / DWORD / HANDLE ...）
+            # 真实类型宽度我们看不到，猜就是制造假错误。
+            # 实测 real_fortranobject.c 里 npy_int/npy_intp 触发 8 条
+            # 假警告——那是 numpy 的 typedef，实际就是 int/long。
+            if base not in ("int", "char", "long", "short",
+                            "float", "double", "void"):
+                continue
+            is_addr = (vt.ptr > 0 or vt.array is not None or bool(vt.dims))
+            if wants_ptr:
+                # %s 要 char* / char[]
+                if is_addr:
+                    continue
+                self.warn("W23", arg.line, arg.col,
+                          f"{fname} 的 %{spec} 需要一个地址或字符串，"
+                          f"实际传的是 {base} 值",
+                          "要传地址请写 &变量，或改用 %d 这类格式符")
+                continue
+            if is_addr:
+                self.warn("W23", arg.line, arg.col,
+                          f"{fname} 的 %{spec} 需要值，实际传的是地址",
+                          "去掉多余的 &，或改用 %s 这类格式符")
+                continue
+            if base not in want:
+                hint = f"{base} 对应的格式符是"
+                if base in ("long", "long long"):
+                    hint += " %lld"
+                elif base == "float" or base == "double":
+                    hint += " %f"
+                elif base == "char":
+                    hint += " %c"
+                else:
+                    hint += " %d"
+                self.warn("W23", arg.line, arg.col,
+                          f"{fname} 的 %{spec} 需要 "
+                          f"{'/'.join(sorted(want))}，实际传的是 {base}",
+                          hint)
+
+    def _vt_silent(self, node):
+        """静默推表达式的 VT，不产生诊断（W23 用）。
+
+        参数本身在正常流程里已经查过一遍，这里只取类型，
+        产生的诊断必须回滚，否则同一个问题会报两次。
+        """
+        saved = len(self.diags)
+        depth = self._expr_depth
+        try:
+            return self.check_expr(node)
+        except Exception:
+            return None
+        finally:
+            if len(self.diags) > saved:
+                del self.diags[saved:]
+            self._expr_depth = depth
+
+    def _parse_fmt_specs(self, fmt):
+        """按顺序取出格式串里的转换说明符，返回 [(spec, 是否指针), ...]。"""
+        out = []
+        i, n = 0, len(fmt)
+        while i < n:
+            if fmt[i] != "%":
+                i += 1
+                continue
+            i += 1
+            if i >= n:
+                break
+            if fmt[i] == "%":
+                i += 1
+                continue                 # %% 是字面百分号
+            # 跳过标志、宽度、精度
+            while i < n and fmt[i] in "-+ #0123456789.*":
+                i += 1
+            head = ""
+            while i < n and fmt[i] in "hlLqjzt":
+                head += fmt[i]
+                i += 1
+            if i >= n:
+                break
+            conv = fmt[i]
+            i += 1
+            spec = head + conv
+            wants_ptr = conv in ("s", "p") or (
+                conv == "[" or conv == "n")
+            out.append((spec, wants_ptr))
+        return out
+
     def check_call(self, call: Call) -> Optional[str]:
         # 任何函数调用都可能通过指针改写调用方的变量，
         # 常量表必须整个作废——否则 `f(&x); ... x + 1` 会按旧值
@@ -2735,6 +2911,10 @@ class Analyzer:
                         self.check_expr(a)
                 else:
                     self.check_expr(a)
+            # W23：格式串与参数类型不匹配
+            self._check_format_args(name, call)
+            # W23：格式串与参数类型不匹配
+            self._check_format_args(name, call)
             # 返回类型查表；没登记的一律"未知"。
             # 早期这里默认 int，于是 fopen/strdup/strstr 的返回值被当成
             # 整数，赋给 FILE*/char* 变量就变成假警告（实测 nmakehlp 6 条）。
