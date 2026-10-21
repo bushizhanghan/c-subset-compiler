@@ -190,7 +190,7 @@ int main() {
 
     ("err_unknown_main", """
 int just_a_func() { return 0; }
-""", {"E10"}),
+""", {"W17"}),
 
     ("err_syntax_missing_paren", """
 int main() {

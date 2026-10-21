@@ -243,9 +243,14 @@ MUTATIONS_JOSEPHUS = [
      "    if (1) {", {"W5"}, None),
 
     # ---- W3 整数除法丢精度 ----
-    ("W3", "return n / 2 整数除",
+    # 注意：必须用字面量除以字面量（5 / 2）。
+    # 早期这里写的是 `return n / 2`，但 n/2 在 stu_02 的真实作业里
+    # 是有意的整数除法（递归除以 2），W3 已明确豁免——
+    # 学生照"改成浮点"的提示做会把递归毁掉。
+    # 所以 W3 只抓"分子也是字面量"的笔误场景。
+    ("W3", "return 5 / 2 整数除",
      "    return n;\n}",
-     "    return n / 2;\n}", {"W3"}, None),
+     "    return 5 / 2;\n}", {"W3"}, "5 / 2"),
     ("W3", "printf 里写 7 / 2",
      '    printf("\\n是否再运行一组数据？(y/n)：");',
      '    printf("\\n是否再运行一组数据？(y/n)：%d", 7 / 2);', {"W3"}, "7 / 2"),
@@ -398,9 +403,9 @@ MUTATIONS_BANK = [
     ("W3", "avgOf 里 sum / n 整数除",
      "    return sum * 1.0 / n;",
      "    return sum / n;", {"W3"}, "sum / n"),
-    ("W3", "fact 里掺入 n / 2 整数除",
+    ("W3", "fact 里掺入 7 / 2 整数除",
      "    return n * fact(n - 1);",
-     "    return n / 2 * fact(n - 1);", {"W3"}, "n / 2"),
+     "    return 7 / 2 * fact(n - 1);", {"W3"}, "7 / 2"),
 
     # ---- W4 float 赋给 int 截断 ----
     ("W4", "int t = 1.5 字面量截断",

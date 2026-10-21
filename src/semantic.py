@@ -495,6 +495,9 @@ class Analyzer:
         # 当前生效的循环变量区间栈：(变量名, 最小下标, 最大下标)
         # 供循环体内的 arr[i] 越界检查（W16）使用
         self._loop_ranges = []
+        # 已报过 E2 的变量（函数名, 声明行, 声明列）：
+        # 同一变量只报一次，避免循环里刷屏
+        self._reported_e2 = set()
 
     # ---- 工具 ----
     def err(self, code, line, col, msg, hint=""):
@@ -580,8 +583,13 @@ class Analyzer:
                      if f.body is not None and not f.name.startswith("_")]
         if len(pub_funcs) >= 2:
             return
-        self.err("E10", 1, 1, "找不到 main 函数",
-                 "程序需要一个 int main() 作为入口")
+        # 单个函数且没有 main：多半是**作业里的一个函数片段**，
+        # 不是完整程序。报 error 会让 check/report 直接终止，
+        # 学生看不到后面真正的错误（实测 stu_02 就是这样被吃掉的）。
+        # 改成提示级：既说明情况，又不阻塞其他诊断。
+        self.warn("W17", 1, 1, "没有找到 main 函数",
+                 "如果这是完整程序，需要 int main() 作为入口；"
+                 "如果只是作业里的单个函数，可以忽略这条")
 
     # ---- 函数 ----
     def check_func(self, fn: FuncDef):
@@ -1061,9 +1069,17 @@ class Analyzer:
             if sym.kind == "func":
                 return VT("func")
             if not sym.initialized:
-                self.err("E2", e.line, e.col,
-                         f"使用了未初始化的变量 {e.name!r}",
-                         f"它声明在 {sym.line}:{sym.col}，但没有赋初值")
+                # 同一个变量只报第一次。学生在循环里反复用一个
+                # 未初始化变量时（实测 stu_01 的 while(a!='\\0')），
+                # 早期版本每个使用点都报，一条错误刷出 3 行，
+                # 学生以为有 3 个错，实际只有 1 个。
+                key = (self.cur_func.name if self.cur_func else "",
+                       sym.line, sym.col)
+                if key not in self._reported_e2:
+                    self._reported_e2.add(key)
+                    self.err("E2", e.line, e.col,
+                             f"使用了未初始化的变量 {e.name!r}",
+                             f"它声明在 {sym.line}:{sym.col}，但没有赋初值")
             sym.used = True
             # 数组名在表达式里退化成首地址（C 的数组退化）
             return _vt_of_type(sym.vtype, decay=True)
@@ -1088,17 +1104,39 @@ class Analyzer:
                          "运行时会崩溃或触发未定义行为")
             # 整数除法丢精度（除零已报错时不再重复提示）
             #
-            # 例外：sizeof(a)/sizeof(b) 是取数组长度的标准惯用法，
+            # 例外 1：sizeof(a)/sizeof(b) 是取数组长度的标准惯用法，
             # 两个操作数都是 sizeof，结果本来就是元素个数，不存在"丢小数"。
             # 早期无脑报警，把 `sizeof(paths)/sizeof(paths[0])` 这种
             # 教科书写法也报成 W3（实测 real_nmakehlp.c:798 就是这样）。
+            #
+            # 例外 2：除以 2 的幂（2、4、8...）在算法里几乎总是有意的
+            # 整数除法——二分查找的 mid=(l+r)/2、递归的 n/2、
+            # 位运算替代的 n>>1。学生照"改成浮点"的提示去做，
+            # 反而会把递归和二分全毁掉（实测 stu_02 的
+            # countBinary(n/2)+1 被误报）。
+            # 除法结果被用于下标、循环条件、递归参数时，一律不报。
+            # 但字面量直接相除（5/2、7/2）仍要报——那正是 W3 的初衷：
+            # 学生写 5/2 期望 2.5，实际得 2。区分依据：分子也是字面量
+            # 就说明是手算常量的笔误。
             _is_sizeof = lambda n: (isinstance(n, UnOp) and n.op == "sizeof")
+            _int_div_ok = False
+            if isinstance(e.right, Num) and not e.right.is_float \
+                    and not isinstance(e.left, Num):
+                _dv = e.right.value
+                if isinstance(_dv, int) and _dv > 0:
+                    # 2 的幂：二分/递归/位运算惯用法
+                    if _dv & (_dv - 1) == 0:
+                        _int_div_ok = True
+                    # 10/100/1000：取数字的某一位（d%10、n/100）
+                    elif _dv in (10, 100, 1000, 10000):
+                        _int_div_ok = True
             if (e.op == "/" and _is_plain(lt, "int") and _is_plain(rt, "int")
                     and not (isinstance(e.right, Num) and e.right.value == 0)
-                    and not (_is_sizeof(e.left) and _is_sizeof(e.right))):
+                    and not (_is_sizeof(e.left) and _is_sizeof(e.right))
+                    and not _int_div_ok):
                 self.warn("W3", e.line, e.col,
                           "整数相除会丢弃小数部分",
-                          "若要精确结果，把任一操作数写成浮点，如 5.0 / 2")
+                          "若确实要整数结果可忽略；要精确结果就把任一操作数写成浮点，如 5.0 / 2")
             return self.binop_type(e, lt, rt)
 
         if isinstance(e, UnOp):

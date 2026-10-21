@@ -25,16 +25,24 @@ SAMPLES = os.path.join(ROOT, "examples", "student_real")
 def read_meta(path):
     """从文件头部注释提取元数据。
 
+    兼容中英文两种头部格式：
+        已知问题：xxx     （student_real/README.md 规定的中文格式）
+        known: xxx        （英文格式）
     返回 dict：source / scenario / known / size。
     known 是「已知问题」的原文，空字符串表示未知。
     """
     meta = {"source": "", "scenario": "", "known": "", "size": ""}
+    # 英文键 -> 中文键
+    cn = {"source": "来源", "scenario": "场景",
+          "known": "已知问题", "size": "规模"}
     try:
         head = open(path, encoding="utf-8", errors="replace").read(2500)
     except OSError:
         return meta
     for key in meta:
-        m = re.search(rf"\*?\s*{key}\s*[:：]\s*(.+)", head)
+        pat = (r"(?:\*?\s*" + key + r"|\*?\s*" + cn[key]
+               + r")\s*[:：]\s*(.+)")
+        m = re.search(pat, head)
         if m:
             meta[key] = m.group(1).strip()
     return meta

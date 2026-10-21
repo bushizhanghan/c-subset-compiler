@@ -478,7 +478,17 @@ class Parser:
         return self.parse_decl_group(ty, name, name_tok)
 
     def _parse_struct_body(self):
-        """解析 { 成员... }，返回成员列表。"""
+        """解析 { 成员... }，返回成员列表。
+
+        成员声明的两种合法形态：
+          带类型    int a; int *b; float xx;
+          省略类型  int r, c;      // 逗号后的 c 继承 int
+
+        省略类型是 C89/C99 的标准语法，学生声明多个同类型成员时
+        极常见（`typedef struct { int r, c; } Pos;`）。
+        早期版本假定每个成员都带类型，遇到省略就报
+        "结构体成员缺少类型"——而 gcc 完全接受这段代码。
+        """
         self.expect("{")
         members = []
         while not self.at("}"):
@@ -489,31 +499,36 @@ class Parser:
                 t = self.cur
                 raise ParseError(f"结构体成员缺少类型，实际是 {t.value!r}",
                                  t.line, t.col)
-            # 成员可能是指针
-            while self.at("*"):
-                self.advance()
-            mname = self.expect_kind(Tok.IDENT, "成员名").value
-            if self.at("["):
-                self.advance()
-                # 数组长度可能是来自头文件的宏（MAX_PATH 等），
-                # 解析不出来就记为未知，不做越界检查，不能报语法错。
-                if self.at_kind(Tok.NUM):
-                    size = self.advance()
-                    try:
-                        mty.array = int(size.value, 0)
-                    except ValueError:
-                        mty.array = None
-                elif self.at_kind(Tok.IDENT):
-                    self.advance()          # 未知长度宏
-                    mty.array = None
-                else:
-                    t = self.cur
-                    raise ParseError("数组长度无法识别", t.line, t.col)
-                self.expect("]")
-            members.append((mty, mname))
-            if self.at(","):
-                self.advance()
-                continue
+            # 一个声明里可以逗号串起多个同名类型成员
+            while True:
+                # 成员可能是指针
+                while self.at("*"):
+                    self.advance()
+                mname = self.expect_kind(Tok.IDENT, "成员名").value
+                m2 = mty
+                if self.at("["):
+                    self.advance()
+                    # 数组长度可能是来自头文件的宏（MAX_PATH 等），
+                    # 解析不出来就记为未知，不做越界检查，不能报语法错。
+                    if self.at_kind(Tok.NUM):
+                        size = self.advance()
+                        try:
+                            m2 = Type(base=mty.base, ptr=mty.ptr,
+                                      array=int(size.value, 0))
+                        except ValueError:
+                            m2 = Type(base=mty.base, ptr=mty.ptr, array=None)
+                    elif self.at_kind(Tok.IDENT):
+                        self.advance()          # 未知长度宏
+                        m2 = Type(base=mty.base, ptr=mty.ptr, array=None)
+                    else:
+                        t = self.cur
+                        raise ParseError("数组长度无法识别", t.line, t.col)
+                    self.expect("]")
+                members.append((m2, mname))
+                if self.at(","):
+                    self.advance()      # 省略类型：下一个成员复用 mty
+                    continue
+                break
             self.expect(";")
         self.expect("}")
         return members

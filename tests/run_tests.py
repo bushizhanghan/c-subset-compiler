@@ -166,9 +166,12 @@ int main() {
 }
 """, {"E11"}),
 
+    # 没有 main：单个函数片段报 W17 提示，不是 error。
+    # 改成提示级是因为作业里的函数片段（stu_02 实测）会被 E10
+    # 挡住，看不到后面真正的错误。
     ("err_no_main", """
 int f() { return 0; }
-""", {"E10"}),
+""", {"W17"}),
 
     # ---- 语法/词法错误 ----
     ("err_syntax_semi", """
@@ -207,17 +210,25 @@ except ImportError:
 
 
 def run_one(src):
-    """返回 (actual_error_codes, diags)。致命错误按阶段归为 LEX/SYN。"""
+    """返回 (actual_error_codes, all_codes, diags)。
+
+    actual 只算 error —— 误报率的定义是"合法代码被报成错误"，
+    警告不算误报（W 系列本来就是"提示你注意"）。
+    all    错误 + 警告全算 —— 用于期望码里含警告的用例
+    （如 W17：没有 main 报提示而不是 error）。
+    """
     try:
         tokenize(src)
     except LexError:
-        return {"LEX"}, []
+        return {"LEX"}, {"LEX"}, []
     try:
         prog = parse(src)
     except ParseError:
-        return {"SYN"}, []
+        return {"SYN"}, {"SYN"}, []
     diags = analyze(prog)
-    return {d.code for d in diags if d.level == "error"}, diags
+    errs = {d.code for d in diags if d.level == "error"}
+    alls = {d.code for d in diags}
+    return errs, alls, diags
 
 
 def main():
@@ -227,7 +238,13 @@ def main():
     rows = []
 
     for name, src, expected in CASES:
-        actual, _ = run_one(src)
+        actual_err, actual_all, _ = run_one(src)
+        # 期望里全是 E/SYN/L 开头 → 用 error 口径比对
+        # 期望里含 W → 用全量口径比对（警告不进误报统计）
+        if expected and any(c.startswith("W") for c in expected):
+            actual = actual_all
+        else:
+            actual = actual_err
         ok = actual == expected
         if expected:
             if actual & expected:
@@ -235,7 +252,7 @@ def main():
             else:
                 fn += 1
         else:
-            if actual:
+            if actual_err:
                 fp += 1
             else:
                 tn += 1
