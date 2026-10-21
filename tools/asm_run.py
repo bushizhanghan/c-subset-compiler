@@ -57,13 +57,24 @@ def assemble(s_path, exe_path, cflags=("-O0",), timeout=120):
 
 
 def execute(exe_path, timeout=30):
-    """跑可执行文件，返回 (退出码 或 None, 说明)。"""
+    """跑可执行文件，返回 (退出码 或 None, 说明)。
+
+    程序的 stdout 原样转发——支持 printf/puts/putchar 之后，
+    看不到输出就没法验证 IO 是否正确。退出码仍由 main() 单独打印一行。
+    """
     try:
-        rc, _out, _err = run([exe_path], timeout=timeout)
+        rc, out, err = run([exe_path], timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, f"运行超时（>{timeout}s，可能是死循环）"
     except OSError as e:
         return None, f"无法执行 {exe_path}: {e}"
+    # 转发程序输出（text=True 的等价物：已解码）
+    if out:
+        sys.stdout.write(out)
+        sys.stdout.flush()
+    if err.strip():
+        sys.stderr.write(err)
+        sys.stderr.flush()
     return signed_exit(rc), ""
 
 

@@ -36,8 +36,16 @@
 | p26_global_bss | 7 | 7 | 一致 |  |
 | p27_global_shared | 3 | 3 | 一致 |  |
 | p28_global_in_cond | 45 | 45 | 一致 |  |
+| p29_printf_plain | 0 | 0 | 一致 |  |
+| p30_printf_int | 0 | 0 | 一致 |  |
+| p31_printf_two_args | 0 | 0 | 一致 |  |
+| p32_putchar | 0 | 0 | 一致 |  |
+| p33_puts | 0 | 0 | 一致 |  |
+| p34_printf_with_recursion | 0 | 0 | 一致 |  |
+| p35_printf_with_loop | 0 | 0 | 一致 |  |
+| p36_printf_with_global | 0 | 0 | 一致 |  |
 
-合计：28/28 一致。
+合计：36/36 一致。
 
 ## 后端实现要点
 
