@@ -117,3 +117,7 @@ _probe2*.py
 _tw29*.py
 _t21.py
 _t22.py
+
+_cm15.py
+_verify.py
+_cov*.py
