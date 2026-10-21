@@ -27,3 +27,10 @@ tools/_codegen_build/
 tools/cg_progs/
 tools/_cg_check_*.py
 _base_*.json
+# 一次性脚本
+_api_push.py
+_probe_*.py
+
+# 一次性对照文件
+_new_diags.json
+*_diags*.json

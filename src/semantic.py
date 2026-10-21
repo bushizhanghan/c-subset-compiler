@@ -210,6 +210,156 @@ def const_int(node, _depth=0):
     return None
 
 
+class VT(str):
+    """表达式的推导类型：基类型名（仍是 str）+ 结构信息。
+
+    为什么继承 str 而不是换成新对象：check_expr 的返回值在十几处被
+    直接和 "float" / "int" 比较（W3/W4/W5 的判据）。换成新对象要改遍
+    整个文件，且漏改一处就静默失效——那正是这个项目最不能接受的
+    失效方式（诊断悄悄不报，测试还是绿的）。
+
+    继承 str 之后 `vt == "float"` 照旧成立，新信息（指针层、数组、
+    符号性）走属性。由此才能修掉三类真实的漏报：
+
+      - `char c = "A"`        —— 需要知道右边是 char*（ptr=1）
+      - `int x = p + 1`       —— 需要知道右边是指针
+      - `if (b < a)` 混合符号 —— 需要知道 a 是无符号（Type.unsigned）
+
+    这些信息以前在表达式层全部丢掉，只剩一个 base 字符串。
+    """
+    __slots__ = ("ptr", "array", "unsigned", "dims")
+
+    def __new__(cls, base="int", ptr=0, array=None, unsigned=False, dims=()):
+        self = super().__new__(cls, base)
+        self.ptr = ptr
+        self.array = array
+        self.unsigned = unsigned
+        self.dims = tuple(dims or ())
+        return self
+
+    def text(self) -> str:
+        """人话版类型名，用于提示语。"""
+        s = str(self)
+        if self.array is not None:
+            s = f"{s}[{self.array}]"
+        return s + "*" * self.ptr
+
+
+def _vt_of_type(ty, decay: bool = True):
+    """把声明里的 Type 转成表达式层的 VT。
+
+    decay=True 表示"数组名在表达式里退化成首地址"（C 的数组退化规则）：
+    每退化一次指针层 +1，所以 int a[3] 的表达式类型是 (ptr=1, array=3)，
+    而 int *p[3]（元素是指针的数组）退化后是 ptr=2。
+
+    声明目标（赋值左边）不能用退化口径，否则 `int a[3]; a = x;`
+    会被当成给指针赋值。赋值检查那边显式传 decay=False。
+    """
+    if ty is None:
+        return None
+    base = ty.base or "int"
+    is_arr = ty.array is not None or bool(ty.dims)
+    ptr = ty.ptr
+    if is_arr and decay:
+        ptr = ty.ptr + 1
+    return VT(base, ptr=ptr,
+              array=ty.array if is_arr else None,
+              unsigned=bool(getattr(ty, "unsigned", False)),
+              dims=tuple(ty.dims or ()))
+
+
+def _is_plain(vt, name=None) -> bool:
+    """是不是"裸的标量类型"（没有指针层、不是数组）。
+
+    继承 str 之后 `VT("int", ptr=1) == "int"` 也是 True，
+    既有判据（W3/W4/W5）如果直接拿来比，会把 int* 当成 int。
+    """
+    if vt is None:
+        return False
+    if getattr(vt, "ptr", 0) > 0 or getattr(vt, "array", None) is not None:
+        return False
+    return name is None or vt == name
+
+
+def _wrap_char(v: int) -> int:
+    """把整数按 char（本机有符号，1 字节）回绕后的值，用于提示语。"""
+    return ((v + 128) % 256) - 128
+
+
+def _is_null_const(node) -> bool:
+    """判断表达式是不是"空指针常量"：0 / NULL / (void*)0。
+
+    这一类赋给指针是合法且高频的写法（`char *p = NULL;`），
+    不豁免就会在真实代码上批量误报。
+    """
+    if node is None:
+        return False
+    if isinstance(node, Num) and not node.is_float:
+        try:
+            return int(node.value) == 0
+        except (TypeError, ValueError):
+            return False
+    if isinstance(node, Ident):
+        if node.name in ("NULL", "nullptr"):
+            return True
+        return STD_MACROS.get(node.name) in ("0", "0L", "0UL")
+    if isinstance(node, UnOp) and node.op == "cast":
+        return _is_null_const(node.operand)
+    return False
+
+
+def _is_explicit_cast(node) -> bool:
+    """右边写了显式转换 (int)ptr / (char*)p 时不再告警。
+
+    显式转换本身就是"我知道我在转"的表达，告警只会制造噪音；
+    而漏掉这条豁免，真实代码里成百上千个 (char*) 转换会全变成假警告。
+    """
+    return isinstance(node, UnOp) and node.op == "cast"
+
+
+# 判"这是不是一个整数类目标"，用于指针->整数的隐式转换检查。
+# 故意只认内置名：typedef 出来的 DWORD / size_t / HANDLE 在我们这里
+# 没有可靠的符号与宽度信息，拿它们做类型判断只会制造误报。
+PLAIN_NUMERIC = ("int", "char", "float", "double")
+INT_CHAR_SIGNED = ("int", "char")
+
+# char 的表示范围（本机 x86-64：char 是有符号的）
+CHAR_MIN, CHAR_MAX = -128, 127
+
+
+# 标准库函数的返回类型。只登记"确定知道"的那些。
+#
+# 为什么必须显式登记、而不能默认 int：fopen 返回 FILE*、strdup 返回
+# char*、strstr 返回 char*。默认 int 会让 `FILE *fp = fopen(...)`
+# 变成"整数赋给指针"，实测 real_nmakehlp.c 上就是这么冒出 6 条假警告的。
+# 没登记的返回 None（未知），语义层就不会基于它下任何结论。
+STD_FUNCS_RET = {
+    # 返回指针
+    "malloc": ("void", 1), "calloc": ("void", 1), "realloc": ("void", 1),
+    "strdup": ("char", 1), "strstr": ("char", 1), "strchr": ("char", 1),
+    "strrchr": ("char", 1), "strtok": ("char", 1), "strcat": ("char", 1),
+    "strcpy": ("char", 1), "strncpy": ("char", 1), "strncat": ("char", 1),
+    "memset": ("void", 1), "memcpy": ("void", 1), "memmove": ("void", 1),
+    "memchr": ("void", 1), "fgets": ("char", 1), "getenv": ("char", 1),
+    "fopen": ("void", 1), "fdopen": ("void", 1), "tmpfile": ("void", 1),
+    "bsearch": ("void", 1), "clock_gettime": ("int", 0),
+    # 返回 int
+    "fclose": ("int", 0), "fprintf": ("int", 0), "fscanf": ("int", 0),
+    "printf": ("int", 0), "puts": ("int", 0), "putchar": ("int", 0),
+    "getchar": ("int", 0), "scanf": ("int", 0), "sscanf": ("int", 0),
+    "sprintf": ("int", 0), "snprintf": ("int", 0), "fputs": ("int", 0),
+    "strlen": ("int", 0), "strcmp": ("int", 0), "strncmp": ("int", 0),
+    "strspn": ("int", 0), "strcspn": ("int", 0), "memcmp": ("int", 0),
+    "atoi": ("int", 0), "atol": ("int", 0), "abs": ("int", 0),
+    "labs": ("int", 0), "rand": ("int", 0), "srand": ("void", 0),
+    "isalpha": ("int", 0), "isdigit": ("int", 0), "isspace": ("int", 0),
+    "toupper": ("int", 0), "tolower": ("int", 0), "time": ("int", 0),
+    "clock": ("int", 0), "fflush": ("int", 0), "exit": ("void", 0),
+    "free": ("void", 0), "perror": ("void", 0), "qsort": ("void", 0),
+    "assert": ("void", 0), "lstrlen": ("int", 0),
+}
+
+
 @dataclass
 class Diag:
     level: str          # "error" | "warning" | "note"
@@ -484,7 +634,8 @@ class Analyzer:
         if vd.init is not None:
             t = self.check_expr(vd.init)
             sym.initialized = True
-            self.check_assign_compat(vd.vtype, t, vd.init, vd.name)
+            self.check_assign_compat(vd.vtype, t, vd.init, vd.name,
+                                     src_node=vd.init)
         elif vd.vtype.array is not None or vd.vtype.dims:
             # 数组不需要整体初始化：元素可以逐个赋值，也可能整块被
             # 函数写入（GetFullPathName(szPath, n, szCwd, NULL)）。
@@ -493,15 +644,146 @@ class Analyzer:
             sym.initialized = True
         self.scope.declare(sym)
 
-    def check_assign_compat(self, target: Type, src_type: Optional[str],
-                            node, name: str):
-        """赋值截断检查（W4）。"""
-        if target.ptr > 0 or src_type is None:
+    def check_assign_compat(self, target: Type, src, node, name: str,
+                            src_node=None):
+        """声明/初始化时的类型兼容检查（目标来自声明里的 Type）。"""
+        self.check_assign_compat_vt(_vt_of_type(target, decay=False),
+                                    src, node, name, src_node)
+
+    def check_assign_compat_vt(self, target_vt, src, node, name: str,
+                               src_node=None):
+        """赋值/初始化时的类型兼容检查（目标已是表达式层 VT）。
+
+        历史上这里只有一条 float->int 的截断检查（W4），因为表达式层
+        只传出 Type.base 一个字符串，指针层和符号性全丢了，
+        想多查一条都没有素材。现在 src 是带结构的 VT，才能补上：
+
+          W4   float 赋给 int/char，小数部分被截断
+          W11  指针与整数隐式转换（两个方向都查）
+          W12  char 赋了超出范围的值（含 char 算术结果回赋 char）
+
+        每一类都带"合法豁免"，宁可少报也不误报：
+          - 显式转换 (int)p / (char*)p 不报（写的人知道自己在做什么）
+          - 空指针常量 0 / NULL 赋给指针不报（合法且高频）
+          - typedef 出来的类型名不参与判断（DWORD、size_t、HANDLE
+            的真实宽度/符号我们看不到，猜就是制造假错误）
+        """
+        if src is None or target_vt is None:
             return
-        if target.base in ("int", "char") and src_type == "float":
+
+        # ---- E18：给数组整体赋值 ----
+        # C 规定数组名是不可修改的左值，`char c[4]; c = "hello";`
+        # 是编译错误，gcc 报 "assignment to expression with array type"。
+        # 学生从 Python/Java 过来时极容易这么写，而且错误信息看不懂。
+        # 注意：初始化列表 int a[3] = {1,2,3} 是合法的，不在检查范围。
+        if getattr(target_vt, "array", None) is not None:
+            self.err("E18", node.line, node.col,
+                     f"不能给数组 {name!r} 整体赋值",
+                     "数组名是不可修改的左值；要初始化就在声明处写 "
+                     "{...}，要改内容就逐个元素或 strcpy")
+            return
+
+        # ---- W4：float 赋给 int/char ----
+        if target_vt.ptr == 0 and target_vt in ("int", "char") \
+                and _is_plain(src, "float"):
             self.warn("W4", node.line, node.col,
-                      f"把 float 赋给 {name!r}（{target.base}），小数部分会被截断",
+                      f"把 float 赋给 {name!r}（{str(target_vt)}），"
+                      f"小数部分会被截断",
                       "确认是否需要 float 类型，或显式写成 (int) 转换")
+            return
+
+        # 显式转换过就到此为止：写的人已经明确表达了意图
+        if _is_explicit_cast(src_node):
+            return
+
+        # ---- W11：指针 -> 整数 ----
+        if src.ptr > 0 and target_vt.ptr == 0 \
+                and str(target_vt) in PLAIN_NUMERIC \
+                and not _is_null_const(src_node) \
+                and not self._is_str_into_char_array(target_vt, src, src_node):
+            self.warn("W11", node.line, node.col,
+                      f"把指针（{src.text()}）赋给整数目标 {name!r}"
+                      f"（{str(target_vt)}）：地址会被截断成一个奇怪的整数",
+                      "若只是借用地址，请用指针类型存；确实要转整数就显式写 "
+                      "(long) 转换")
+            return
+
+        # ---- W11：整数 -> 指针 ----
+        if target_vt.ptr > 0 and src.ptr == 0 \
+                and str(src) in PLAIN_NUMERIC \
+                and not _is_null_const(src_node):
+            self.warn("W11", node.line, node.col,
+                      f"把整数（{src.text()}）赋给指针 {name!r}："
+                      f"这不是一个有效的地址",
+                      "要表示空指针请写 0 或 NULL；其他地址必须来自 "
+                      "取地址 &x / 数组名 / malloc")
+            return
+
+        # ---- W12：给 char 赋超出范围的值 ----
+        # 只看**右值**节点：传进来的是整条赋值语句的话，const_int 永远折不出
+        # 常量，这条检查会静默失效（实测 `c = 300` 一条都不报）。
+        if str(target_vt) == "char" and target_vt.ptr == 0 and src.ptr == 0 \
+                and not target_vt.unsigned:
+            self.check_char_range(src_node if src_node is not None else node,
+                                  name)
+
+    def _is_str_into_char_array(self, target_vt, src, src_node) -> bool:
+        """`char buf[16] = "abc";` 是合法的初始化，不是指针赋给整数。
+
+        数组初始化时右边写字符串字面量是 C 的标准写法（逐字节拷贝，
+        不含取地址语义）。判据要同时看三件事，缺一个就会误伤：
+          - 目标 base 是 char
+          - 目标是数组（array/dims 有值）
+          - 右边确实是字符串字面量节点
+        """
+        if str(target_vt) != "char":
+            return False
+        if target_vt.array is None and not target_vt.dims:
+            return False
+        return isinstance(src_node, Str)
+
+    def check_char_range(self, node, name: str):
+        """char 赋值的范围检查（W12）。
+
+        char 只有 1 字节，范围 -128..127。两处会静默出错：
+
+          1) 常量直接超范围： char c = 300;      -> 变成 44
+          2) char 参与算术后回赋：c = c + 200;   -> 同样被截断
+
+        为什么值得报：这两种写法 GCC 默认一声不响（要 -Wconversion
+        才提示），学生只会看到"数值莫名其妙变了"。
+
+        只在**确有把握**时报：
+          - 情形 1 要求能折成常量
+          - 情形 2 要求算术的一侧是 char 变量、另一侧是超过 char 范围的常量
+        真实代码里 `c = c + 1` 这类自增完全不会命中。
+        """
+        # 情形 1：常量表达式直接超范围
+        ci = const_int(node)
+        if ci is not None:
+            if ci < CHAR_MIN or ci > CHAR_MAX:
+                self.warn("W12", node.line, node.col,
+                          f"把 {ci} 赋给 char 变量 {name!r}，"
+                          f"超出 char 的表示范围（{CHAR_MIN}..{CHAR_MAX}），"
+                          f"会变成 {_wrap_char(ci)}",
+                          "改用 int，或确认截断后的值是否就是本意")
+            return
+        if not isinstance(node, BinOp) or node.op not in ("+", "-", "*", "/"):
+            return
+        # 情形 2：char 参与算术，另一侧是超范围的整数常量
+        for side, other in ((node.left, node.right), (node.right, node.left)):
+            vt = self._vt_at(side)
+            if vt is None or not _is_plain(vt, "char"):
+                continue
+            oc = const_int(other)
+            if oc is not None and (oc > CHAR_MAX or oc < CHAR_MIN):
+                self.warn("W12", node.line, node.col,
+                          f"char 变量参与算术后赋回 {name!r}：整数提升会把"
+                          f"结果变成 int（这里含常量 {oc}），"
+                          f"写回 char 时超出 {CHAR_MIN}..{CHAR_MAX} 会被截断",
+                          "先把中间结果存到 int 变量里，再决定是否转回 char")
+                return
+
 
     # ---- 语句 ----
     def check_block(self, blk: Block, new_scope=True):
@@ -524,11 +806,28 @@ class Analyzer:
             self.check_vardecl(s)
         elif isinstance(s, If):
             self.check_condition(s.cond, "if")
+            # W13：if 条件后直接跟分号 = 空分支
+            # `if (a > b); max = a;` 是教材专门警告的陷阱：
+            # 分号构成 if 的整个 then 分支，紧跟的代码变成无条件执行。
+            # 缩进看起来像有分支，实际什么都不做。
+            # gcc -Wall 只给 -Wempty-body 警告，很多人不开。
+            if self._is_empty_body(s.then):
+                self.warn("W13", s.line, s.col,
+                          "if 的条件后面直接跟了分号，then 分支是空的",
+                          "后面那行代码会无条件执行；删掉分号或改成 {}")
             self.check_stmt(s.then)
             if s.els is not None:
                 self.check_stmt(s.els)
         elif isinstance(s, While):
             self.check_condition(s.cond, "while")
+            # 豁免：条件里含函数调用时，空循环体几乎总是故意的。
+            # 经典写法 while (getchar() != '\n');  清空输入缓冲区，
+            # 条件本身有副作用，循环体空是对的。
+            # 不加这条豁免，hw_josephus.c 会一下冒出 4 个误报。
+            if self._is_empty_body(s.body) and not _has_call(s.cond):
+                self.warn("W13", s.line, s.col,
+                          "while 的循环体是空语句",
+                          "若是故意的（忙等待）请加注释说明；否则代码不会按预期执行")
             self.loop_depth += 1
             self.check_stmt(s.body)
             self.loop_depth -= 1
@@ -588,31 +887,43 @@ class Analyzer:
             self.warn("W5", cond.line, cond.col,
                       f"条件恒为{'真' if truth else '假'}（常量 {cond.value}）",
                       "检查是否漏写了变量或比较")
-        if t == "float":
-            # 只有"浮点表达式与 0 直接比较"才有精度风险。
-            # 早期版本不区分条件形态，只要条件整体是浮点就报，
-            # 于是 `if (a + b == c)` 也被说成"与 0 直接比较"——
-            # 结论方向没错但文案是错的，学生会以为代码里有个 0。
-            is_zero_cmp = (
-                isinstance(cond, BinOp)
-                and cond.op in ("==", "!=", "<", ">", "<=", ">=")
-                and ((isinstance(cond.right, Num) and cond.right.value == 0)
-                     or (isinstance(cond.left, Num) and cond.left.value == 0))
-            )
-            if is_zero_cmp:
-                self.warn("W5", cond.line, cond.col,
-                          "浮点值与 0 直接比较，可能因精度出错",
-                          "改用 fabs(x) < 1e-6 之类的写法")
-            else:
-                # 浮点之间用 == 比较同样有风险，但文案不同
-                if isinstance(cond, BinOp) and cond.op in ("==", "!="):
+        # 浮点比较的精度风险（W5）。
+        #
+        # 判据必须落在"被比较的两个操作数"上，而不是条件整体的类型：
+        # 比较运算的结果在 C 里恒为 int，用 cond 的类型去判断永远不成立。
+        # 早期版本恰好是拿 cond 的类型比 float —— 那时比较运算直接返回
+        # 操作数类型才碰巧能work；现在 binop_type 如实返回 int 之后，
+        # 不看操作数就会把这条检查整条丢掉（实测 err_06 丢了 W5）。
+        if isinstance(cond, BinOp) and cond.op in ("==", "!=", "<", ">",
+                                                   "<=", ">="):
+            lt = self._vt_at(cond.left)
+            rt = self._vt_at(cond.right)
+            is_float_cmp = (_is_plain(lt, "float") or _is_plain(rt, "float")
+                            or lt == "double" or rt == "double")
+            if is_float_cmp:
+                # 只有"浮点表达式与 0 直接比较"才有那种特定的精度风险。
+                # 区分文案：`if (f == 0)` 和 `if (a == b)` 都是坏味道，
+                # 但说成"与 0 比较"在后者上是错的，学生会以为代码里有个 0。
+                is_zero_cmp = (
+                    (isinstance(cond.right, Num) and cond.right.value == 0)
+                    or (isinstance(cond.left, Num) and cond.left.value == 0)
+                )
+                if is_zero_cmp:
+                    self.warn("W5", cond.line, cond.col,
+                              "浮点值与 0 直接比较，可能因精度出错",
+                              "改用 fabs(x) < 1e-6 之类的写法")
+                elif cond.op in ("==", "!="):
                     self.warn("W5", cond.line, cond.col,
                               "浮点值用 == 或 != 比较，可能因精度出错",
                               "浮点运算有误差，建议比较差值是否小于阈值")
 
     # ---- 表达式 ----
-    def check_expr(self, e) -> Optional[str]:
-        """返回表达式的推导类型名，未知返回 None。
+    def check_expr(self, e):
+        """返回表达式的推导类型（VT：基类型 + 指针/数组/符号性）。
+
+        VT 是 str 子类，所以既有的 `t == "float"` 判据全部照旧成立；
+        新增的结构信息走属性，供指针/字符/符号检查使用。
+        未知返回 None。
 
         带递归深度保护：超长下标链/成员链会让 AST 深达数百层，
         不做限制就是 RecursionError（stack overflow），
@@ -625,36 +936,49 @@ class Analyzer:
                          "表达式嵌套过深，无法完成类型检查",
                          "把长表达式拆成多条语句")
                 return None
-            return self._check_expr_inner(e)
+            t = self._check_expr_inner(e)
+            # 把类型挂在节点上：后面的范围检查/实参检查要用到子表达式的
+            # 类型，重算一遍会把同一条诊断重复报出，也浪费。
+            if e is not None:
+                try:
+                    e._vt = t
+                except Exception:
+                    pass
+            return t
         finally:
             self._expr_depth -= 1
 
-    def _check_expr_inner(self, e) -> Optional[str]:
+    def _vt_at(self, node):
+        """取子表达式已缓存的类型（没有就返回 None，绝不重算）。"""
+        return getattr(node, "_vt", None)
+
+    def _check_expr_inner(self, e):
         if e is None:
             return None
 
         if isinstance(e, Num):
-            return "float" if e.is_float else "int"
+            return VT("float") if e.is_float else VT("int")
 
         if isinstance(e, Str):
-            return "char*"
+            # 字符串字面量：指向首字符的指针，只读。
+            return VT("char", ptr=1)
 
         if isinstance(e, Ident):
             # sizeof(int) 里的 int 是类型名，不是变量。
-            # parser 用 repr(Type) 把它塞进 Ident，这里要认出来。
+            # parser 用 repr(Type) 把这个名字塞进 Ident，这里要认出来。
             sym = self.scope.lookup(e.name)
             # NULL 这类标准库常量
             if sym is None and e.name in STD_MACROS:
-                return "int"
+                return VT("int")
             # sizeof(Node) 里的 typedef 名
             if sym is None and e.name in self.typedefs:
-                return "int"
+                return VT("int")
             if sym is None and _is_type_name(e.name):
-                return "int"
+                return VT("int")
             # 框架里的小写类型名（npy_intp 等），当类型处理
             if sym is None and (e.name.startswith("npy_")
                                 or e.name.startswith("NPY_")):
-                return "int"
+                return VT("int")
             # 来自被忽略头文件的宏（全大写），容忍掉。
             # 这类名字在我们看不到的 .h 里有定义，报错是误报。
             if sym is None and _is_likely_external_macro(e.name):
@@ -665,13 +989,14 @@ class Analyzer:
                          "检查拼写，或先声明它")
                 return None
             if sym.kind == "func":
-                return "func"
+                return VT("func")
             if not sym.initialized:
                 self.err("E2", e.line, e.col,
                          f"使用了未初始化的变量 {e.name!r}",
                          f"它声明在 {sym.line}:{sym.col}，但没有赋初值")
             sym.used = True
-            return sym.vtype.base
+            # 数组名在表达式里退化成首地址（C 的数组退化）
+            return _vt_of_type(sym.vtype, decay=True)
 
         if isinstance(e, BinOp):
             lt = self.check_expr(e.left)
@@ -688,25 +1013,34 @@ class Analyzer:
             # 早期无脑报警，把 `sizeof(paths)/sizeof(paths[0])` 这种
             # 教科书写法也报成 W3（实测 real_nmakehlp.c:798 就是这样）。
             _is_sizeof = lambda n: (isinstance(n, UnOp) and n.op == "sizeof")
-            if (e.op == "/" and lt == "int" and rt == "int"
+            if (e.op == "/" and _is_plain(lt, "int") and _is_plain(rt, "int")
                     and not (isinstance(e.right, Num) and e.right.value == 0)
                     and not (_is_sizeof(e.left) and _is_sizeof(e.right))):
                 self.warn("W3", e.line, e.col,
                           "整数相除会丢弃小数部分",
                           "若要精确结果，把任一操作数写成浮点，如 5.0 / 2")
-            if lt == "float" or rt == "float":
-                return "float"
-            return lt or rt
+            return self.binop_type(e, lt, rt)
 
         if isinstance(e, UnOp):
-            # 类型转换 (Node *)malloc(...) 里的 Node 是类型名，不是变量
+            # 类型转换 (Node *)malloc(...) / (int)p：
+            # 目标类型写在节点上（cast_type），显式转换的结果就是目标类型。
+            # 以前这里返回操作数类型、把转换当纯语法糖，于是 (int)ptr 之后
+            # 语义层仍认为它是指针——基于类型的检查全部失准。
             if e.op == "cast":
-                return self.check_expr(e.operand)
+                self.check_expr(e.operand)
+                ct = getattr(e, "cast_type", None)
+                if ct is not None:
+                    return _vt_of_type(ct, decay=False)
+                return self._vt_at(e.operand)
             # 取地址 &x 只是取地址，不读 x 的值，所以不该检查 x 是否初始化。
             # 不这么处理的话，struct S *p = &s; 之后再用 s 会被误报未初始化
             # （实测 (*p).a 就因这条链路报了 s 未初始化）。
             if e.op == "&":
-                return self.check_lvalue(e.operand)
+                t = self.check_lvalue(e.operand)
+                if t is None:
+                    return None
+                return VT(str(t), ptr=t.ptr + 1, array=None,
+                          unsigned=t.unsigned)
             # 解引用 *p 会读 p 指向的内容，p 本身必须已初始化
             if e.op == "*":
                 base = e.operand
@@ -718,8 +1052,14 @@ class Analyzer:
                             self.err("E2", base.line, base.col,
                                      f"对未初始化的指针 {base.name!r} 做解引用",
                                      "先让它指向有效的内存")
-                        return sym.vtype.base
-                return self.check_expr(base)
+                        vt = _vt_of_type(sym.vtype, decay=True)
+                        return VT(str(vt), ptr=max(vt.ptr - 1, 0),
+                                  array=None, unsigned=vt.unsigned)
+                t = self.check_expr(base)
+                if t is None:
+                    return None
+                return VT(str(t), ptr=max(t.ptr - 1, 0), array=None,
+                          unsigned=t.unsigned)
             # sizeof 在算类型尺寸之前不能调 check_expr(e.operand)：
             # 操作数可能是类型名（sizeof(int)），当成变量检查会误报 E1。
             if e.op == "sizeof":
@@ -729,18 +1069,26 @@ class Analyzer:
                     e.size_value = sz
                 except Exception:
                     pass
-                return "int"
+                return VT("int")
             t = self.check_expr(e.operand)
-            if e.op == "!":
-                return "int"
+            if e.op in ("!",):
+                return VT("int")
+            if e.op in ("++", "--", "post++", "post--"):
+                return t
+            if e.op in ("-", "+", "~") and t is not None:
+                # 一元运算里的整数提升：char 参与运算后是 int
+                return VT("int") if _is_plain(t, "char") else t
             return t
 
         if isinstance(e, Ternary):
             self.check_expr(e.cond)
             t1 = self.check_expr(e.then)
             t2 = self.check_expr(e.els)
-            if t1 == "float" or t2 == "float":
-                return "float"
+            if _is_plain(t1, "float") or _is_plain(t2, "float") \
+                    or t1 == "double" or t2 == "double":
+                return VT("float")
+            if t1 is not None and t1.ptr > 0:
+                return t1
             return t1 or t2
 
         if isinstance(e, Assign):
@@ -752,17 +1100,21 @@ class Analyzer:
                 sym = self.scope.lookup(e.target.name)
                 if sym:
                     sym.initialized = True
-                    self.check_assign_compat(sym.vtype, vt, e, e.target.name)
+            # 复合赋值（+= -= ...）的"目标类型"不是左值类型：
+            # p += 1 在 C 里就是指针加，属于合法写法。
+            if e.op == "=" and tt is not None:
+                self.check_assign_compat_table(tt, vt, e, e.target,
+                                               e.value)
             return tt
 
         if isinstance(e, Call):
             return self.check_call(e)
 
         if isinstance(e, Index):
-            self.check_expr(e.base)
+            bt = self.check_expr(e.base)
             self.check_expr(e.idx)
             self.check_oob(e, "read")
-            return "int"
+            return self.index_type(bt)
 
         if isinstance(e, InitList):
             for it in e.items:
@@ -773,6 +1125,88 @@ class Analyzer:
             return self.check_member(e)
 
         return None
+
+    def binop_type(self, e: "BinOp", lt, rt):
+        """二元运算的结果类型（贴近 C 的通常算术转换）。
+
+        必须真的算，不能像早期那样 `return lt or rt`：
+        char 参与算术后要提升成 int，指针加整数仍是指针，
+        这两条直接决定 W11/W12 能不能报对。
+        """
+        op = e.op
+        # 指针运算：ptr ± int -> ptr；ptr - ptr -> int；指针比较 -> int
+        lp = lt is not None and lt.ptr > 0
+        rp = rt is not None and rt.ptr > 0
+        if op in ("+", "-"):
+            if lp and rp:
+                return VT("int")
+            if lp:
+                return VT(str(lt), ptr=lt.ptr, array=None,
+                          unsigned=lt.unsigned)
+            if rp:
+                return VT(str(rt), ptr=rt.ptr, array=None,
+                          unsigned=rt.unsigned)
+        if op in ("==", "!=", "<", ">", "<=", ">="):
+            # 混合符号比较：C 会把有符号操作数转成无符号再比，
+            # -1 于是变成 4294967295。这是真实且极难自查的坑。
+            self.check_mixed_sign_compare(e, lt, rt)
+            return VT("int")
+        if op in ("&&", "||"):
+            return VT("int")
+        # 浮点优先
+        if _is_plain(lt, "float") or _is_plain(rt, "float") \
+                or lt == "double" or rt == "double":
+            return VT("float")
+        # 整数提升：char/short 参与运算一律变 int
+        if lt is not None and _is_plain(lt, "char") \
+                or rt is not None and _is_plain(rt, "char"):
+            return VT("int")
+        # 有符号/无符号：只要有 unsigned 而宽度够，结果就是 unsigned
+        if lt is not None and getattr(lt, "unsigned", False) \
+                or rt is not None and getattr(rt, "unsigned", False):
+            return VT("int", unsigned=True)
+        return lt or rt
+
+    def check_mixed_sign_compare(self, e: "BinOp", lt, rt):
+        """W2：有符号与无符号混合比较。
+
+            unsigned int a = 5;
+            int b = -1;
+            if (b < a) { ... }        // -1 被转成 4294967295，结果恒假
+
+        C 的"通常算术转换"规定：int 与 unsigned int 一起运算时，
+        int 先转成 unsigned。于是负的有符号数变成一个巨大的正数，
+        比较结果与数学直觉相反。教材在"类型转换"一节专门讲这条，
+        而 gcc 要 -Wsign-compare（-Wextra 里）才提示。
+
+        只在**确凿**时报，避免误报：
+          - 两侧都得是内置的整数类（int/char），指针比较不算
+          - 只有一侧 unsigned、另一侧 signed
+          - 有符号那侧不能是已折成非负常量的字面量：
+            `if (n < 10u)` 里的 10u 是常量、非负，不构成陷阱
+        """
+        if lt is None or rt is None:
+            return
+        if lt.ptr > 0 or rt.ptr > 0:
+            return                      # 指针比较，不同语义，不碰
+        if _is_plain(lt, "float") or _is_plain(rt, "float") \
+                or lt == "double" or rt == "double":
+            return                      # 不是整数比较
+        lu = bool(getattr(lt, "unsigned", False))
+        ru = bool(getattr(rt, "unsigned", False))
+        if lu == ru:
+            return                      # 同符号，没有陷阱
+        # 任一侧能折成非负常量就不构成陷阱：
+        # `if (n < 10u)` 是常规写法，unsigned 那侧是常量，不会翻车。
+        for node in (e.left, e.right):
+            c = const_int(node)
+            if c is not None and c >= 0:
+                return
+        self.warn("W2", e.line, e.col,
+                  "有符号与无符号混合比较：有符号侧会被转成无符号，"
+                  "负数会变成一个很大的正数，比较结果可能与直觉相反",
+                  "两边统一成同一符号再比较，如 (unsigned)b < a 或"
+                  "把变量声明成同一种符号；也可用显式转换表达意图")
 
     def resolve_struct(self, ty) -> Optional[StructDef]:
         """把变量的类型解析到 struct 定义上。
@@ -1033,7 +1467,11 @@ class Analyzer:
                          hint)
                 return None
             cur_ty = self.expand_typedef(names[m.name])
-        return cur_ty.base if cur_ty else None
+        if cur_ty is None:
+            return None
+        # 返回结构化的 VT：成员是数组时同样要退化（p->name 是 char*），
+        # 成员是 int 时不能带上指针层，两者都影响调用处的类型判断。
+        return _vt_of_type(cur_ty, decay=True)
 
 
     def check_member_chain_exprs(self, e):
@@ -1182,10 +1620,28 @@ class Analyzer:
                       f"返回了局部数组 {v.name!r}（数组名退化为首地址），"
                       f"该地址在函数返回后失效",
                       "改用全局数组、static 数组，或用 malloc 分配")
-    def check_lvalue(self, e) -> Optional[str]:
+    def _is_empty_body(self, stmt) -> bool:
+        """判断 if/while 的分支是不是空语句。
+
+        parser 把 `if (c);` 的 then 解析成 stmts 为空的 Block。
+        真正的 `if (c) { }` 也是空块，但那种写法意图明确。
+        这里统一按空块处理，理由：
+          - 误报代价低（一句提示）
+          - 漏报代价高（逻辑错误静默通过）
+        """
+        from parser import Block as _B
+        if isinstance(stmt, _B):
+            return len(stmt.stmts) == 0
+        return False
+    def check_lvalue(self, e):
         """左值检查：只验证"这个标识符存不存在"，不检查是否已初始化。
 
         写入一个未初始化变量是完全合法的，把它当错误报是典型的误报。
+
+        返回值是**左值自身**的类型（decay=False）：赋值目标的口径必须和
+        表达式口径分开。`int a[3]; int *p = a;` 右边 a 退化成指针，
+        而 `a = ...` 左边 a 是数组本身——混用会让"给数组名赋值"
+        被当成给指针赋值，指针与整数混用就永远查不出来。
         """
         if isinstance(e, Ident):
             sym = self.scope.lookup(e.name)
@@ -1196,33 +1652,86 @@ class Analyzer:
                 if (e.name in STD_MACROS or e.name in self.typedefs
                         or _is_type_name(e.name)
                         or _is_likely_external_macro(e.name)):
-                    return "int"
+                    return VT("int")
                 self.err("E1", e.line, e.col,
                          f"使用了未声明的变量 {e.name!r}",
                          "检查拼写，或先声明它")
                 return None
             if sym.kind == "func":
-                return "func"
+                return VT("func")
             sym.used = True
-            return sym.vtype.base
+            return _vt_of_type(sym.vtype, decay=False)
         if isinstance(e, Index):
             # 下标表达式的 base 与 idx 都是"读"，走普通检查
-            self.check_expr(e.base)
+            bt = self.check_expr(e.base)
             self.check_expr(e.idx)
             # 写入数组元素同样要查越界：arr[-1] = 1 也是错的
             self.check_oob(e, "write")
-            return "int"
+            return self.index_type(bt)
         if isinstance(e, UnOp) and e.op == "*":
-            return self.check_expr(e.operand)
+            t = self.check_expr(e.operand)
+            if t is None:
+                return None
+            return VT(str(t), ptr=max(t.ptr - 1, 0), array=None,
+                      unsigned=t.unsigned)
         if isinstance(e, UnOp) and e.op == "&":
             # &v 是取地址：v 只是"被取地址"，不算读取它的值。
             # scanf("%d", &v) 里的 v 就是典型情况，按读取检查会误报未初始化。
-            return self.check_lvalue(e.operand)
+            t = self.check_lvalue(e.operand)
+            if t is None:
+                return None
+            return VT(str(t), ptr=t.ptr + 1, array=None, unsigned=t.unsigned)
         if isinstance(e, Member):
             # 写成员字段同样要走成员检查（拼错的字段名要报），
             # 但不把整个结构体变量当成"被读取"。
             return self.check_member(e)
         return self.check_expr(e)
+
+    def index_type(self, bt):
+        """数组/指针取一次下标的元素类型。"""
+        if bt is None:
+            return VT("int")        # 推导不到就退回 int，绝不因此误报
+        if bt.ptr > 0:
+            return VT(str(bt), ptr=bt.ptr - 1, array=None,
+                      unsigned=bt.unsigned)
+        if bt.dims:
+            rest = list(bt.dims)[1:]
+            return VT(str(bt), ptr=0,
+                      array=rest[0] if rest else None,
+                      unsigned=bt.unsigned, dims=rest)
+        if bt.array is not None:
+            return VT(str(bt), ptr=0, array=None, unsigned=bt.unsigned)
+        return VT(str(bt), ptr=0, array=None, unsigned=bt.unsigned)
+
+    def check_assign_compat_table(self, tt, vt, node, target_node, value_node):
+        """按左值类型做赋值兼容检查。
+
+        左值可能不是裸标识符（`*p = q`、`a[i] = q`、`s.f = q`），
+        这种情况下也应当检查，否则"把指针存进 int 数组元素"这类
+        同样真实的错误就漏掉了。左值类型来自 check_lvalue（已带结构）。
+        """
+        if tt is None or vt is None:
+            return
+        if str(tt) == "func":
+            return
+        name = (target_node.name if isinstance(target_node, Ident)
+                else self._describe_lvalue(target_node))
+        self.check_assign_compat_vt(tt, vt, node, name, value_node)
+
+    def _describe_lvalue(self, node) -> str:
+        """给非标识符左值起一个人话名字，用于提示语。"""
+        if isinstance(node, Index):
+            base = self._describe_lvalue(node.base)
+            return f"{base}[...]"
+        if isinstance(node, Member):
+            base = self._describe_lvalue(node.base)
+            sep = "->" if node.arrow else "."
+            return f"{base}{sep}{node.name}"
+        if isinstance(node, UnOp) and node.op == "*":
+            return f"*{self._describe_lvalue(node.operand)}"
+        if isinstance(node, Ident):
+            return node.name
+        return "该位置"
 
     def check_call(self, call: Call) -> Optional[str]:
         if not isinstance(call.func, Ident):
@@ -1256,7 +1765,7 @@ class Analyzer:
                 sym_call.used = True
                 for a in call.args:
                     self.check_expr(a)
-                return "int"
+                return None         # 函数指针的签名看不到，返回未知
 
         # 标准库函数：不报未声明，并按其语义检查参数
         if fn is None and name in STD_FUNCS:
@@ -1311,15 +1820,14 @@ class Analyzer:
                         self.check_expr(a)
                 else:
                     self.check_expr(a)
-            # malloc/calloc 返回指针
-            if name in ("malloc", "calloc", "realloc"):
-                return "void*"
-            if name in ("strlen", "strcmp", "atoi", "abs", "getchar",
-                        "putchar", "printf", "scanf"):
-                return "int"
-            if name in ("malloc",):
-                return "void*"
-            return "int"
+            # 返回类型查表；没登记的一律"未知"。
+            # 早期这里默认 int，于是 fopen/strdup/strstr 的返回值被当成
+            # 整数，赋给 FILE*/char* 变量就变成假警告（实测 nmakehlp 6 条）。
+            ret = STD_FUNCS_RET.get(name)
+            if ret is None:
+                return None
+            base, ptr = ret
+            return VT(base, ptr=ptr)
 
         if fn is None:
             # 来自被忽略头文件的函数（Windows API、CPython C-API、
@@ -1338,13 +1846,12 @@ class Analyzer:
                             sym.initialized = True
                     else:
                         self.check_expr(a)
-                return "int"
-            self.err("E5", call.line, call.col,
-                     f"调用了未声明的函数 {name!r}",
-                     "检查拼写，或先添加函数声明")
-            for a in call.args:
-                self.check_expr(a)
-            return None
+                # 看不到声明就不知道它返回什么，必须老实返回"未知"。
+                # 早期这里一律返回 int，于是 PyObject_New / PyDict_GetItem
+                # 这类外部函数的返回值被当成 int，再赋给指针变量时
+                # 就命中"把整数赋给指针"——实测 real_fortranobject.c
+                # 一次冒出 26 条这种假警告。看不到就不知道，猜必误报。
+                return None
             self.err("E5", call.line, call.col,
                      f"调用了未声明的函数 {name!r}",
                      "检查拼写，或先添加函数声明")
@@ -1359,9 +1866,55 @@ class Analyzer:
             self.err("E4", call.line, call.col,
                      f"函数 {name!r} 需要 {expected} 个参数，但传了 {got} 个",
                      "对照函数定义检查调用")
-        for a in call.args:
-            self.check_expr(a)
-        return fn.ret_type.base if fn.ret_type else None
+        for i, a in enumerate(call.args):
+            at = self.check_expr(a)
+            # 实参类型比对：个数对上了不代表类型对。
+            # 参数个数不符时不再逐个比类型——那时候位置已经错位，
+            # 报出来的"类型不匹配"只会误导（例如少传一个参数后，
+            # 每个实参都对着错的形参）。
+            if fn.body is not None and expected == got and i < expected:
+                self.check_arg_type(fn, i, a, at)
+        if fn.ret_type is None:
+            return None
+        return _vt_of_type(fn.ret_type, decay=False)
+
+    def check_arg_type(self, fn, index: int, arg_node, arg_vt):
+        """实参 -> 形参的类型兼容检查（W10）。
+
+        针对的是教材里 "数组作函数参数" 那一节的经典错误：
+
+            int sum_all(int v) { ... }         // 形参写成了 int
+            printf("%d", sum_all(a));          // 实参是数组
+
+        数组名退化成首地址传进去，形参按 int 收，函数里累加的是
+        一个垃圾地址值。gcc 给 "makes integer from pointer"，
+        csub 原来完全不查实参类型。
+
+        只报"指针/数组 -> 裸整数形参"这一个方向，而且是 warning：
+          - 整数 -> 形参是指针 不报（真实代码里已有大量 0/NULL 写法，
+            而看不到声明的外部函数更多，报必误报）
+          - 形参是 typedef 名（DWORD、size_t、Py_ssize_t）不报，
+            我们不知道它到底是不是指针
+        """
+        if index >= len(fn.params) or arg_vt is None:
+            return
+        pty = fn.params[index][0]
+        if pty is None:
+            return
+        pvt = _vt_of_type(pty, decay=False)
+        if pvt.ptr > 0 or str(pvt) not in PLAIN_NUMERIC:
+            return                      # 形参要的就是指针/不透明类型
+        if arg_vt.ptr == 0 or _is_null_const(arg_node) \
+                or _is_explicit_cast(arg_node):
+            return
+        pname = fn.params[index][1] or f"第 {index + 1} 个参数"
+        self.warn("W10", arg_node.line, arg_node.col,
+                  f"把{'数组' if arg_vt.array is not None else '指针'}"
+                  f"（{arg_vt.text()}）传给 {fn.name!r} 的整数形参 "
+                  f"{pname!r}（{str(pvt)}）：传进去的是地址，"
+                  f"函数里拿它当数值用",
+                  f"把形参改成指针（{str(pvt)} *{pname}），"
+                  "或传数组元素 a[i]")
 
 
 def analyze(prog: Program) -> list:
@@ -1423,4 +1976,23 @@ def _looks_like_external_fn(name: str) -> bool:
             rest = name[len(prefix):]
             if rest[:1].isupper():
                 return True
+    return False
+
+def _has_call(node, _depth=0):
+    """判断表达式里是否含函数调用（用于空循环体的豁免判定）。"""
+    if node is None or _depth > 40:
+        return False
+    name = type(node).__name__
+    if name == "Call":
+        return True
+    for attr in ("left", "right", "operand", "cond", "then", "els",
+                 "base", "idx", "value", "target"):
+        child = getattr(node, attr, None)
+        if child is None:
+            continue
+        if isinstance(child, list):
+            if any(_has_call(c, _depth + 1) for c in child):
+                return True
+        elif _has_call(child, _depth + 1):
+            return True
     return False

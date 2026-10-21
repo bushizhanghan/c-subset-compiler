@@ -1,4 +1,4 @@
-﻿"""语法分析器：token 流 -> AST。
+"""语法分析器：token 流 -> AST。
 
 采用递归下降 + 运算符优先级爬升（precedence climbing）。
 支持 C 子集：
@@ -167,6 +167,11 @@ class BinOp(Node):
 class UnOp(Node):
     op: str = ""
     operand: object = None
+    # (类型)x 显式转换里被转换到的类型。
+    # 原来转换算子是"纯语法糖"，类型信息在解析时就被丢掉了，
+    # 于是 (int)ptr 之后语义层仍把它当成指针，任何基于类型的检查
+    # 都会误判。显式转换本来就该屏蔽隐式转换告警，所以必须留下来。
+    cast_type: object = None
 
 
 @dataclass
@@ -214,6 +219,12 @@ class Type:
     ptr: int = 0            # 指针层数
     array: Optional[int] = None
     dims: list = field(default_factory=list)   # 多维数组的各维长度
+    # 无符号标记。base 仍归一化成 int / char，这样 sizeof / 尺寸表 /
+    # 结构体解析等既有逻辑一行都不用改；符号性单独保留，
+    # 供语义层做"有符号/无符号混合比较"检查（W2）。
+    # 不保留的话 `unsigned int a` 和 `int a` 完全无法区分，
+    # 混合比较这类真实缺陷就永远查不出来。
+    unsigned: bool = False
 
     def __repr__(self):
         arr = "".join(f"[{d}]" for d in self.dims) if self.dims else (
@@ -369,7 +380,9 @@ class Parser:
                 base = "char"
             else:
                 base = "int"
-            ty = Type(base=base)
+            # 归一化会丢掉符号性，单独记下来：unsigned int 与 int
+            # 在比较/赋值语义上不同，丢了就查不出混合符号比较。
+            ty = Type(base=base, unsigned=("unsigned" in words))
             while self.at("*"):
                 self.advance()
                 ty.ptr += 1
@@ -586,7 +599,8 @@ class Parser:
             alias = self.expect_kind(Tok.IDENT, "类型别名").value
             self.known_types.add(alias)
             sd.typedefs.append(
-                (alias, Type(base=base_ty.base, ptr=base_ty.ptr + ptr)))
+                (alias, Type(base=base_ty.base, ptr=base_ty.ptr + ptr,
+                             unsigned=base_ty.unsigned)))
             if self.at(","):
                 self.advance()
                 continue
@@ -788,7 +802,9 @@ class Parser:
         while self.at(","):
             self.advance()
             # 后续变量沿用同一基础类型，但指针层数可能不同：int a, *p;
-            sub = Type(base=vtype.base, ptr=0, array=None)
+            # 符号性也要沿用：unsigned int a, *p; 两个都是无符号。
+            sub = Type(base=vtype.base, ptr=0, array=None,
+                       unsigned=vtype.unsigned)
             while self.at("*"):
                 self.advance()
                 sub.ptr += 1
@@ -1211,9 +1227,11 @@ class Parser:
             cast_ty = self.try_parse_cast_type()
             if cast_ty is not None and self.at(")"):
                 self.advance()
-                # 转换运算符本身不影响后续求值，直接丢弃类型信息
+                # 转换运算符本身不影响后续求值，但目标类型要留下：
+                # 语义层用它来判断"显式转换"从而压制隐式转换告警，
+                # 也用它推导表达式类型（(int)ptr 不该还是 pointer）。
                 return UnOp(line=t.line, col=t.col, op="cast",
-                            operand=self.parse_unary())
+                            operand=self.parse_unary(), cast_type=cast_ty)
             self.i = save
             self.advance()
             e = self.parse_expr()
