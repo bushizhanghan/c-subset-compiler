@@ -39,3 +39,9 @@ _new_diags.json
 _g*.c
 _ov*.c
 _t*.c
+
+# 一次性推送脚本
+_gpush.py
+_token.txt
+_base.txt
+_local.txt
