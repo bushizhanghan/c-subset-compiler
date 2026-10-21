@@ -644,3 +644,65 @@ int main() {
 }
 """, set()),
 ]
+
+
+# ---- W22 复合赋值里又写同一个变量 ----
+# stu_02 是 11 份样本里最早发现却一直没修的漏报：
+#     rev += rev + t * d;      // 学生本意 rev = rev + t*d
+# `x += expr` 展开是 x = x + expr，expr 里再出现 x 就变成 2x + ...，
+# 结果翻倍。等了两轮样本确认不是高频模式（只有 stu_02 撞到），
+# 但它是唯一"确定根因却没修"的一条。
+EXTRA_CASES += [
+    ("warn_compound_self_ref", """
+int main() {
+    int rev = 0, t = 1, d = 1;
+    rev += rev + t * d;
+    return rev;
+}
+""", {"W22"}),
+
+    ("warn_compound_self_x", """
+int main() { int x = 1; x += x; return x; }
+""", {"W22"}),
+
+    # 反向：正常复合赋值
+    ("ok_compound_normal", """
+int main() { int x = 1; x += 1; x += 2; return x; }
+""", set()),
+
+    # 反向：右侧是别的变量
+    ("ok_compound_other_var", """
+int main() { int x = 1, y = 2; x += y; return x; }
+""", set()),
+
+    # 反向：循环里累加（s = s + i 不是 s += s）
+    ("ok_compound_in_loop", """
+int main() {
+    int i = 0, s = 0;
+    for (i = 0; i < 5; i = i + 1) { s = s + i; }
+    return s;
+}
+""", set()),
+
+    # 反向：位运算和位移的自引用是合法的
+    ("ok_compound_bitwise", """
+int main() { int x = 3; x |= x; x <<= x; return x; }
+""", set()),
+
+    # 反向：指针运算
+    ("ok_compound_pointer", """
+int main() {
+    int a[3];
+    int *p = a;
+    int *q = a;
+    p += q - p;
+    return *p;
+}
+""", set()),
+
+    # 反向：x += f(x) 语义明确，不是笔误
+    ("ok_compound_with_call", """
+int inc(int v) { return v + 1; }
+int main() { int x = 1; x += inc(x); return x; }
+""", set()),
+]
