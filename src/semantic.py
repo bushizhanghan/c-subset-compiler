@@ -108,6 +108,22 @@ STD_MACROS = {"NULL": "0", "EOF": "-1", "EXIT_SUCCESS": "0",
               "RAND_MAX": "32767", "INT_MAX": "2147483647",
               "INT_MIN": "-2147483648", "M_PI": "3.141592653589793"}
 
+# 参数必须是指针/字符串的标准库函数：名字 -> 必须是地址的参数下标集合。
+# 用于 W26（指针参数收到非指针值）。只收录签名确定的，拿不准的不放。
+STD_PTR_ARGS = {
+    "strcmp": {0, 1}, "strncmp": {0, 1},
+    "strcpy": {0, 1}, "strncpy": {0, 1},
+    "strcat": {0, 1}, "strncat": {0, 1},
+    "strlen": {0}, "strstr": {0, 1},
+    "strchr": {0}, "strrchr": {0}, "strtok": {0, 1},
+    "memset": {0}, "memcpy": {0, 1}, "memmove": {0, 1},
+    "memcmp": {0, 1}, "memchr": {0},
+    "puts": {0}, "fputs": {0},
+    "free": {0}, "fclose": {0}, "fflush": {0},
+    "atoi": {0}, "atol": {0}, "atof": {0},
+}
+
+
 # 常见库函数：名字 -> (最少参数, 最多参数, 第几个参数是"写出"位置)
 # 写成"写出"是为了不把 scanf("%d", &v) 里的 v 当成未初始化读取。
 STD_FUNCS = {
@@ -2838,6 +2854,52 @@ class Analyzer:
                   f"在文件开头补 #include <{hdr}>，"
                   f"否则编译器会报隐式声明")
 
+    def _check_ptr_args(self, fname, call):
+        """W26：标准库函数的指针参数收到了非指针值。
+
+            char *b[101];
+            strcmp(*b[j], *b[j+1]);   // *b[j] 是 char，strcmp 要 char*
+
+        gcc 报 "passing argument 1 of 'strcmp' makes pointer from integer"。
+        真实来源：老师在 stu_01 里把这条标为★致命。
+
+        保守规则：
+          - 只查 STD_PTR_ARGS 里明确要求指针的位置
+          - 实参推导不出类型就跳过
+          - 空指针常量（0/NULL）放行
+          - 数组名/指针/&表达式都算地址
+        """
+        want = STD_PTR_ARGS.get(fname)
+        if not want:
+            return
+        for idx in want:
+            if idx >= len(call.args):
+                continue
+            arg = call.args[idx]
+            if _is_null_const(arg):
+                continue
+            vt = self._vt_silent(arg)
+            if vt is None:
+                continue
+            is_addr = (vt.ptr > 0 or vt.array is not None or bool(vt.dims))
+            if is_addr:
+                continue
+            # 未知的 typedef（LinkList / size_t / HANDLE / DWORD ...）
+            # 真实宽度和指针性我们看不到，猜就是制造假错误。
+            # 实测 hw_josephus.c 的 free(LinkList变量) 被误报 ——
+            # LinkList 本身就是 typedef 出来的指针。
+            base = str(vt).replace("struct ", "")
+            if base not in ("int", "char", "long", "short",
+                            "float", "double", "void"):
+                continue
+            if isinstance(arg, UnOp) and arg.op == "&":
+                continue
+            self.warn("W26", arg.line, arg.col,
+                      f"{fname}() 的第 {idx + 1} 个参数需要指针/字符串，"
+                      f"实际传的是 {str(vt)} 值",
+                      "传地址（&变量）或指针；若是想传字符串首字符，"
+                      "去掉多余的 *")
+
     def _check_format_args(self, fname, call):
         """W23：printf/scanf 的格式串与实参类型不匹配。
 
@@ -3104,6 +3166,8 @@ class Analyzer:
             self._check_format_args(name, call)
             # W25：调标准库函数但没包含对应头文件
             self._check_missing_include(name, call)
+            # W26：指针参数收到非指针值
+            self._check_ptr_args(name, call)
             # 返回类型查表；没登记的一律"未知"。
             # 早期这里默认 int，于是 fopen/strdup/strstr 的返回值被当成
             # 整数，赋给 FILE*/char* 变量就变成假警告（实测 nmakehlp 6 条）。

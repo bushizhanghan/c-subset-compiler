@@ -978,3 +978,77 @@ int main() {
 int main() { return abs(-1); }
 """, set()),
 ]
+
+
+# ---- W26 标准库函数的指针参数收到非指针值 ----
+# 来源：老师在 stu_01 里把 `strcmp(*b[j], *b[j+1])` 标为★致命。
+# `*b[j]` 是 char（首字符），strcmp 要 char*。
+# gcc 报 "passing argument 1 of 'strcmp' makes pointer from integer"。
+#
+# 和 W23 是同一类逻辑（函数要地址、给了值），但 W23 只覆盖
+# printf/scanf 家族的格式串，覆盖不到 strcmp/strlen/free 这些。
+EXTRA_CASES += [
+    # 应报
+    ("warn_ptr_arg_strcmp", """
+#include <string.h>
+int main() {
+    char *b[3];
+    strcmp(*b[0], *b[1]);
+    return 0;
+}
+""", {"W26"}),
+
+    ("warn_ptr_arg_strlen", """
+#include <string.h>
+int main() {
+    char *s;
+    return strlen(*s);
+}
+""", {"W26"}),
+
+    ("warn_ptr_arg_free", """
+#include <stdlib.h>
+int main() {
+    char *p;
+    free(*p);
+    return 0;
+}
+""", {"W26"}),
+
+    # 反向（不该报）
+    ("ok_ptr_arg_strcmp", """
+#include <string.h>
+int main() {
+    char *a = "x";
+    char *b = "y";
+    strcmp(a, b);
+    return 0;
+}
+""", set()),
+
+    ("ok_ptr_arg_strlen_array", """
+#include <string.h>
+int main() {
+    char s[10];
+    return strlen(s);
+}
+""", set()),
+
+    ("ok_ptr_arg_strlen_literal", """
+#include <string.h>
+int main() { return strlen("abc"); }
+""", set()),
+
+    ("ok_ptr_arg_free_null", """
+#include <stdlib.h>
+int main() { free(0); return 0; }
+""", set()),
+
+    ("ok_ptr_arg_strlen_addr", """
+#include <string.h>
+int main() {
+    char c = 65;
+    return strlen(&c);
+}
+""", set()),
+]
