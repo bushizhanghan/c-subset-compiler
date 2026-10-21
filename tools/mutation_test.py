@@ -73,6 +73,12 @@ def check_text(src: str):
     except ParseError as e:
         return {SYN_CODE}, [("error", SYN_CODE,
                              pr.to_orig_line(e.line), e.col, str(e))]
+    # parser 现在带错误恢复：语法错误不抛异常，收集在 prog.errors 里。
+    # 不检查这个，所有 SYN 类变异都会变成"漏报"（实测 6 条）。
+    if getattr(prog, "errors", None):
+        e = prog.errors[0]
+        return {SYN_CODE}, [("error", SYN_CODE,
+                             pr.to_orig_line(e.line), e.col, str(e))]
     diags = analyze(prog)
     return ({d.code for d in diags},
             [(d.level, d.code, pr.to_orig_line(d.line), d.col, d.msg)

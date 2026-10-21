@@ -233,6 +233,11 @@ def run_one(src):
         prog = parse(src)
     except ParseError:
         return {"SYN"}, {"SYN"}, []
+    # parser 现在带错误恢复：语法错误不抛异常了，收集在 prog.errors 里。
+    # 用例期望 {"SYN"} 时必须能看到这些错误（实测 6 个 err_syntax_* 用例
+    # 在改完恢复逻辑后全部变成"实际无诊断"）。
+    if getattr(prog, "errors", None):
+        return {"SYN"}, {"SYN"}, []
     diags = analyze(prog)
     errs = {d.code for d in diags if d.level == "error"}
     alls = {d.code for d in diags}

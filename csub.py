@@ -91,9 +91,15 @@ def collect_diags(path, verbose=True):
     except ParseError as e:
         return remap_diags(
             [Diag("error", "SYN", e.line, e.col, e.msg)], pr), "parse", pr
-    # 把预处理记录的头文件名传下去，W25（漏 include）要用
-    return remap_diags(analyze(prog, includes=pr.includes),
-                       pr), "semantic", pr
+    # parser 现在带错误恢复：语法错误收集在 prog.errors 里，
+    # 声明列表已经跳过坏掉的那段继续解析了。
+    # 把这些语法错误和语义诊断**一起**输出 —— 漏一个分号不该
+    # 让后面所有语义检查都失效（实测 stu_17）。
+    syn = [Diag("error", "SYN", e.line, e.col, e.msg)
+           for e in getattr(prog, "errors", [])]
+    sem = analyze(prog, includes=pr.includes)
+    # 语法错误排前面，语义诊断在后
+    return remap_diags(syn + sem, pr), "semantic", pr
 
 
 def cmd_tokens(path):

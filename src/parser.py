@@ -455,10 +455,100 @@ class Parser:
 
     # ---- 顶层 ----
     def parse(self) -> Program:
+        """解析整个程序，带错误恢复。
+
+        C 的语法错误（尤其漏分号）是最常见的一类，而早期版本
+        遇到第一个语法错误就整份文件放弃——后面所有语义错误
+        都看不到。实测 stu_17：漏一个分号，老师标的 7 条错误里
+        5 条（其中 4 个★致命）完全不可见。
+
+        恢复策略：以"顶层声明"为恢复单元。某个声明解析失败时，
+        收集这个错误，跳到下一个可能的声明起点（行首的
+        typedef/struct/类型名），继续解析后面的内容。
+
+        收集到的错误放在 prog.errors 里，由调用方决定怎么呈现。
+        这样 check/report 能同时给出语法错误和后续的语义诊断。
+        """
         prog = Program(line=1, col=1)
+        prog.errors = []
+        guard = 0
         while not self.at_kind(Tok.EOF):
-            prog.decls.append(self.parse_top())
+            guard += 1
+            if guard > 10000:            # 防御：避免恢复逻辑自身死循环
+                break
+            start = self.i
+            try:
+                prog.decls.append(self.parse_top())
+            except ParseError as e:
+                prog.errors.append(e)
+                # 无条件跳到下一个声明起点。
+                # 早期写成"只有没产出节点时才恢复"，但
+                # _decl_count_before 从来没更新过，那个判断永远
+                # 失效 —— 于是坏掉的那段被逐个 token 报错，
+                # 刷出几十条垃圾诊断。
+                self._recover_to_next_decl()
+                # 恢复后没前进就强制消耗一个 token，防死循环
+                if self.i == start:
+                    self.advance()
         return prog
+
+    def _recover_to_next_decl(self):
+        """跳到下一个可能的顶层声明起点。
+
+        策略（从简单到复杂，按顺序试）：
+          A) 如果当前 token 是 `}`，跳过它；如果后面紧跟
+             类型关键字/`typedef`/`struct`，那就是下一个声明
+          B) 否则一路跳到最近的 `;`，再跳到它后面
+          C) 之后如果当前 token 看起来像声明起点就停，
+             不像就再跳一轮
+          D) 最多跳 500 个 token 就放弃
+
+        为什么不能"只找行首类型关键字"：漏分号时后面可能是一整段
+        语句（`while (...) { ... }`），每个 token 都在行首附近，
+        逐个报"期望类型声明"会刷出几十条垃圾诊断（实测 stu_17
+        初版刷了 20+ 条）。
+        """
+        for _round in range(50):
+            if self.at_kind(Tok.EOF):
+                return
+            # A) 先消化掉紧跟的右花括号
+            if self.cur.value == "}":
+                self.advance()
+                continue
+            # C) 已经像声明起点就停
+            if self._looks_like_decl_start():
+                return
+            # B) 跳到最近的 ; 之后
+            moved = False
+            skipped = 0
+            while not self.at_kind(Tok.EOF) and skipped < 500:
+                skipped += 1
+                t = self.cur
+                self.advance()
+                moved = True
+                if t.value == ";":
+                    break
+                if t.value == "}" and self._looks_like_decl_start():
+                    break
+            if not moved:
+                return
+        return
+
+    def _looks_like_decl_start(self) -> bool:
+        """当前 token 是否像顶层声明的开头。"""
+        t = self.cur
+        if t.kind == Tok.EOF:
+            return False
+        if t.kind == Tok.KW and t.value in (
+                "typedef", "struct", "enum", "union", "int", "char",
+                "void", "float", "double", "unsigned", "signed",
+                "long", "short", "static", "const", "extern", "bool"):
+            return True
+        # 未知类型名（typedef 出来的）+ 名字
+        if t.kind == Tok.IDENT and self.peek().kind == Tok.IDENT:
+            return True
+        return False
+
 
     def parse_top(self):
         # typedef struct {...} Node, *LinkList;  真实作业的标配

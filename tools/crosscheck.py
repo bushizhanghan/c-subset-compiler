@@ -71,18 +71,23 @@ PROGRAMS = [
         int main(){ return f(1, 2); }""", False),
     ("bad_break", "int main(){ break; return 0; }", False),
 
-    # ---- csub 有意比 gcc 严格的三例 ----
+    # ---- csub 有意比 gcc 严格的两例 ----
     # gcc 放行这些写法，因为它们属于"未定义行为"或"链接期问题"，
     # 编译器为了速度和灵活不报。但它们正是初学者最常踩的坑，
     # 教学工具的价值就在于把这类"能编译但会出事"的代码拦下来。
-    # 这三项不算不一致，单独统计为 STRICTER。
-    ("bad_no_main", "int f(){ return 0; }", False),
+    # 这两项不算不一致，单独统计为 STRICTER。
+    #
+    # 注意：早期还有一条 bad_no_main（`int f(){ return 0; }` 期望报错），
+    # 后来 W17（没有 main）被整个删掉了 —— 真实的完整程序几乎不会
+    # 只含一个非 main 函数，而 LeetCode/PTA 的函数题全都没有 main，
+    # 报就是纯噪音（实测连续三份样本每份都触发）。
+    # 这里同步移除，否则会算成"真不一致"。
     ("bad_uninit", "int main(){ int a; int b = a; return b; }", False),
     ("bad_oob_const", "int main(){ int a[2]; a[2] = 1; return 0; }", False),
 ]
 
 # 这些用例 csub 更严格是设计意图，不计入"不一致"
-STRICTER_BY_DESIGN = {"bad_no_main", "bad_uninit", "bad_oob_const"}
+STRICTER_BY_DESIGN = {"bad_uninit", "bad_oob_const"}
 
 
 def gcc_syntax_ok(src: str):
@@ -124,7 +129,7 @@ def gcc_run_value(src: str):
 
 
 def csub_syntax_ok(src: str):
-    """csub 的判定：有 error 就算非法。"""
+    """csub 的判定：有语法错误或语义 error 就算非法。"""
     try:
         tokenize(src)
     except LexError:
@@ -132,6 +137,11 @@ def csub_syntax_ok(src: str):
     try:
         prog = parse(src)
     except ParseError:
+        return False
+    # parser 现在带错误恢复，语法错误收集在 prog.errors 里不抛异常。
+    # 不检查这个，所有语法非法用例都会被判成"通过"
+    # （实测 bad_syntax 变成 csub 过松）。
+    if getattr(prog, "errors", None):
         return False
     diags = analyze(prog)
     return not any(d.level == "error" for d in diags)
