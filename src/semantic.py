@@ -620,6 +620,8 @@ class Analyzer:
                          "所有控制流路径都必须有 return")
             self.warn("W8", fn.line, fn.col,
                       f"{who} 函数可能没有 return 语句", hint)
+        # W18：递归无法到达基线条件 → 无限递归
+        self.check_recursion_terminates(fn)
         self.pop()
         self.cur_func = None
 
@@ -2019,6 +2021,127 @@ class Analyzer:
             self.warn("W16", e.line, e.col,
                       f"循环变量 {var} 最小可取 {lo}，数组下标不能为负",
                       "检查循环条件或初值")
+
+    def check_recursion_terminates(self, fn):
+        """W18：递归调用无法到达基线条件 → 无限递归（栈溢出）。
+
+        检测逻辑：
+        1. 找出函数对自己的递归调用（c(n-1, x) 里 c 就是 fn.name）
+        2. 取递归调用里第一个参数的变化量（n-1 → -1，n → 0，n+1 → +1）
+        3. 看基线条件 if (n == K) / if (n <= K) 等：
+           - 参数递减且基线是 ==0/<=K → 安全
+           - 参数不变 → 一定无限递归
+           - 参数递增 → 一定无限递归（除非基线在递增方向）
+           - 递减但步长跨过基线值 → 可能漏（如 n-2 而基线只有 ==0，
+             n 起始为奇数时永远到不了 0）
+
+        保守规则：只在**确凿**时报。方向判断不了、基线形态不标准
+        就一律不报——递归是真实代码里的常见手段，误报代价高。
+        """
+        name = fn.name
+        # 收集递归调用：(参数变化量, 行, 列)
+        rec_calls = []
+        self._collect_rec_calls(fn.body, name, rec_calls, 0)
+        if not rec_calls:
+            return
+        # 基线条件：函数体第一层 if 里的形参比较
+        base = self._find_recursion_base(fn)
+        if base is None:
+            return                      # 没有可识别的基线，不判断
+        pname, op, kval = base
+        for delta, line, col in rec_calls:
+            if delta == 0:
+                self.warn("W18", line, col,
+                          f"递归调用 {name}(...) 时参数 {pname} 没有变化，"
+                          f"会无限递归导致栈溢出",
+                          "让递归参数逐步靠近基线条件，如 n - 1")
+                return
+            # 参数递增，而基线在下方（== 0 / <= K）→ 越跑越远
+            if delta > 0 and op in ("==", "<=", "<"):
+                self.warn("W18", line, col,
+                          f"递归调用让 {pname} 递增（+{delta}），"
+                          f"但基线条件是 {pname} {op} {kval}，"
+                          f"永远到不了基线",
+                          f"把递归参数改成递减，如 {pname} - 1")
+                return
+            # 参数递减但步长跨过基线：n-2 而基线是 ==0
+            if delta < 0 and op == "==":
+                step = -delta
+                if kval % step != 0:
+                    self.warn("W18", line, col,
+                              f"递归调用让 {pname} 每次减 {step}，"
+                              f"但基线条件是 {pname} == {kval}，"
+                              f"{kval} 不是 {step} 的倍数时会跳过基线",
+                              f"基线条件改成 {pname} <= 0，"
+                              f"或让步长能整除 {kval}")
+                    return
+
+    def _collect_rec_calls(self, node, fname, out, _depth=0):
+        """收集对 fname 的递归调用，解析第一个参数的变化量。"""
+        if node is None or _depth > 40:
+            return
+        if isinstance(node, Call) and isinstance(node.func, Ident) \
+                and node.func.name == fname:
+            delta = self._param_delta(node)
+            if delta is not None:
+                out.append((delta, node.line, node.col))
+            return
+        for attr in ("body", "stmts", "then", "els", "value", "target",
+                     "left", "right", "operand", "cond", "init", "step",
+                     "args", "base", "idx"):
+            child = getattr(node, attr, None)
+            if child is None:
+                continue
+            if isinstance(child, list):
+                for c in child:
+                    self._collect_rec_calls(c, fname, out, _depth + 1)
+            else:
+                self._collect_rec_calls(child, fname, out, _depth + 1)
+
+    def _param_delta(self, call):
+        """解析递归调用第一个参数相对形参的变化量。
+
+        c(n-1, x) → -1    c(n+1, x) → +1    c(n, x) → 0
+        不是「形参 ± 常量」的形态就返回 None（不判断）。
+        """
+        if not call.args:
+            return None
+        a0 = call.args[0]
+        # 直接传形参本身：delta 0
+        if isinstance(a0, Ident):
+            return 0
+        if isinstance(a0, BinOp) and a0.op in ("+", "-") \
+                and isinstance(a0.left, Ident) \
+                and isinstance(a0.right, Num) \
+                and not a0.right.is_float:
+            v = int(a0.right.value)
+            return v if a0.op == "+" else -v
+        return None
+
+    def _find_recursion_base(self, fn):
+        """找基线条件：函数体第一层 if 里对第一个形参的比较。
+
+        返回 (形参名, 运算符, 常量值)，找不到返回 None。
+        只认 `n == 0` / `n <= 0` / `n < 1` 这类标准形态。
+        """
+        pname = None
+        for pty, pn in fn.params:
+            if pn:
+                pname = pn
+                break
+        if pname is None or not isinstance(fn.body, Block):
+            return None
+        for s in fn.body.stmts:
+            if isinstance(s, If):
+                c = s.cond
+                if isinstance(c, BinOp) and c.op in ("==", "<=", "<",
+                                                     ">=", ">"):
+                    if isinstance(c.left, Ident) and c.left.name == pname \
+                            and isinstance(c.right, Num) \
+                            and not c.right.is_float:
+                        return (pname, c.op, int(c.right.value))
+            # 只看第一层，遇不到标准形态就放弃
+        return None
 
     def check_lvalue(self, e):
         """左值检查：只验证"这个标识符存不存在"，不检查是否已初始化。
