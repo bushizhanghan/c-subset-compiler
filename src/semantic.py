@@ -507,6 +507,10 @@ class Analyzer:
         self._reported_e2 = set()
         # 当前作用域深度，用于块作用域逃逸检测（W20）
         self._scope_depth = 0
+        # 已知是常量的局部变量（W14b 用）。
+        # 只记"字面量直接赋值"的变量，被重新赋值立即删除，
+        # 绝不做跨控制流的传播——那会产生假阳性。
+        self._const_vars = {}
 
     # ---- 工具 ----
     def err(self, code, line, col, msg, hint=""):
@@ -771,6 +775,8 @@ class Analyzer:
         if vd.init is not None:
             t = self.check_expr(vd.init)
             sym.initialized = True
+            # W14b：声明初始化时就可能溢出（int big = 2147483647+1）
+            self._check_decl_overflow(vd)
             self.check_assign_compat(vd.vtype, t, vd.init, vd.name,
                                      src_node=vd.init)
         elif vd.vtype.array is not None or vd.vtype.dims:
@@ -1288,6 +1294,8 @@ class Analyzer:
                     sym.initialized = True
             # W20：块作用域逃逸
             self._check_scope_escape(e)
+            # W14b：赋值时右侧含"常量变量"的溢出（err_38）
+            self._check_assign_overflow(e)
             # 复合赋值（+= -= ...）的"目标类型"不是左值类型：
             # p += 1 在 C 里就是指针加，属于合法写法。
             if e.op == "=" and tt is not None:
@@ -2245,6 +2253,141 @@ class Analyzer:
                   f"读到的是栈上残留的垃圾值",
                   "先初始化元素（循环赋值，或声明时写 = {...}）")
 
+    def _check_decl_overflow(self, vd):
+        """W14b：声明初始化时右侧表达式溢出。
+
+            int over = big + 1;     // big 是已知常量 2147483647
+
+        和 _check_assign_overflow 共用常量表，区别只在于
+        入口是声明语句而非赋值语句。真正的 err_38 是这种形态：
+        `int big = 2147483647; int over = big + 1;`
+        两行都是 VarDecl，都走这里。
+        """
+        ty = vd.vtype
+        if ty is None:
+            return
+        if ty.array is not None or ty.dims or ty.ptr > 0:
+            return                    # 只查标量
+        val = self._eval_const(vd.init)
+        if val is None:
+            return
+        # long / unsigned 不适用 int 范围
+        if self._const_var_suffix(vd.init):
+            return
+        # 目标类型是 long 也不按 int 范围判断（else 分支同理）
+        if (ty.base or "int") in ("long", "double", "float"):
+            return
+        if val > INT_MAX or val < INT_MIN:
+            self.warn("W14", vd.line, vd.col,
+                      f"表达式结果 {val} 超出 int 范围"
+                      f"（合法范围 {INT_MIN} ~ {INT_MAX}），会被截断",
+                      "若确实需要大数，改用 long long")
+        elif (ty.base or "int") not in ("long", "double", "float"):
+            # 记录常量值供后续表达式使用。
+            # 注意：parser 把 long 归一化成 int（ty.base 永远是 int），
+            # 所以靠 ty.long_flag 区分。long 变量不记账：
+            # `long a=2147483647; long b=a+1;` 若记账，
+            # a+1=2147483648 会按 int 范围误报（实测踩过）。
+            if INT_MIN <= val <= INT_MAX \
+                    and not getattr(ty, "long_flag", False):
+                self._const_vars[vd.name] = val
+
+    def _check_assign_overflow(self, e):
+        """W14b：赋值右侧含「常量变量」的表达式溢出。
+
+            int big = 2147483647;
+            int over = big + 1;      // 溢出，实际得 -2147483648
+
+        W14 只查纯字面量表达式，这里补上变量参与的形态。
+
+        做法：用 const_int_ext 求值（认识"已知是常量的变量"），
+        超范围时报 W14。故意做得比 W14 更保守：
+          - 只在赋值语句检查，不做全局常量传播
+          - 常量表只认"字面量直接赋值"的变量，不认任何计算得来的
+          - 一旦变量被重新赋值，常量状态立刻失效
+
+        为什么不做完整常量传播：那会让常量表跨控制流存活
+        （if (c) x = 5; else x = 7; 之后 x 仍是 5），
+        产生假阳性。这里宁可少查也不引入那种风险。
+        """
+        if e.op not in ("=", "+=", "-=", "*="):
+            return
+        val = self._eval_const(e.value)
+        if val is None:
+            # 右侧不是常量表达式：目标变量的常量状态失效
+            if isinstance(e.target, Ident):
+                self._const_vars.pop(e.target.name, None)
+            return
+        # 目标如果是常量变量，把它的值记下来（供后续表达式用）
+        target_is_const = False
+        if isinstance(e.target, Ident):
+            sym = self.scope.lookup(e.target.name)
+            if sym is not None and sym.vtype is not None:
+                if sym.vtype.array is None and not sym.vtype.dims \
+                        and sym.vtype.ptr == 0:
+                    target_is_const = True
+        # 检查溢出
+        if val > INT_MAX or val < INT_MIN:
+            # long / unsigned 不适用 int 范围，跳过
+            suf = self._const_var_suffix(e.value)
+            if suf:
+                return
+            self.warn("W14", e.line, e.col,
+                      f"表达式结果 {val} 超出 int 范围"
+                      f"（合法范围 {INT_MIN} ~ {INT_MAX}），"
+                      f"会被截断",
+                      "若确实需要大数，改用 long long")
+            return
+        # 记下常量值（仅在安全时）
+        if target_is_const and e.op == "=":
+            self._const_vars[e.target.name] = val
+
+    def _eval_const(self, node, _depth=0):
+        """求常量表达式的值；含非常量变量时返回 None。
+
+        只认「字面量」和「已知是常量的变量」，不做任何传播。
+        """
+        if node is None or _depth > 20:
+            return None
+        if isinstance(node, Num) and not node.is_float:
+            return int(node.value)
+        if isinstance(node, Ident):
+            return self._const_vars.get(node.name)
+        if isinstance(node, UnOp) and node.op in ("-", "+"):
+            v = self._eval_const(node.operand, _depth + 1)
+            if v is None:
+                return None
+            return -v if node.op == "-" else v
+        if isinstance(node, BinOp) and node.op in ("+", "-", "*"):
+            a = self._eval_const(node.left, _depth + 1)
+            b = self._eval_const(node.right, _depth + 1)
+            if a is None or b is None:
+                return None
+            try:
+                if node.op == "+":
+                    return a + b
+                if node.op == "-":
+                    return a - b
+                return a * b
+            except (ValueError, OverflowError):
+                return None
+        return None
+
+    def _const_var_suffix(self, node):
+        """表达式里若有 long/unsigned 字面量，返回其后缀（跳过溢出检查）。"""
+        if node is None:
+            return ""
+        if isinstance(node, Num):
+            suf = (node.suffix or "").lower()
+            return suf if ("l" in suf or "u" in suf) else ""
+        for attr in ("left", "right", "operand"):
+            child = getattr(node, attr, None)
+            if child is not None:
+                s = self._const_var_suffix(child)
+                if s:
+                    return s
+        return ""
+
     def _check_scope_escape(self, e):
         """W20：把内层块的局部变量地址赋给外层指针 → 出块后悬垂。
 
@@ -2394,6 +2537,11 @@ class Analyzer:
         return "该位置"
 
     def check_call(self, call: Call) -> Optional[str]:
+        # 任何函数调用都可能通过指针改写调用方的变量，
+        # 常量表必须整个作废——否则 `f(&x); ... x + 1` 会按旧值
+        # 算成常量，进而产生假的溢出诊断。
+        # 保守但正确：宁可少查，不制造假阳性。
+        self._const_vars.clear()
         if not isinstance(call.func, Ident):
             # 函数指针调用：(*fn)(...) / obj->fp(...)。
             # 看不到被调函数的签名，所以按外部函数处理：

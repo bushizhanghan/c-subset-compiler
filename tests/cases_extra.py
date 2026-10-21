@@ -567,3 +567,80 @@ int main() {
 }
 """, set()),
 ]
+
+
+# ---- W14 常量变量参与的溢出 ----
+# W14 早期只查纯字面量表达式（2000000000 + 2000000000），
+# 变量参与的一律放过。err_38 就是变量形态：
+#     int big = 2147483647;
+#     int over = big + 1;      // 溢出
+# 补一个受限的常量表接住它。注意常量表的失效条件必须测全：
+# 函数调用、重新赋值成非常量——这两处漏一个就会假阳性。
+EXTRA_CASES += [
+    ("warn_overflow_const_var", """
+int main() {
+    int big = 2147483647;
+    int over = big + 1;
+    return over;
+}
+""", {"W14"}),
+
+    ("warn_overflow_mul_chain", """
+int main() {
+    int a = 46341;
+    int b = a * 46341;
+    return b;
+}
+""", {"W14"}),
+
+    # 反向：long 变量不按 int 范围判断
+    ("ok_overflow_long_var", """
+int main() {
+    long a = 2147483647;
+    long b = a + 1;
+    return (int)b;
+}
+""", set()),
+
+    # 反向：unsigned 不适用（回绕是定义好的行为）
+    ("ok_overflow_unsigned_var", """
+int main() {
+    unsigned a = 2147483647u;
+    unsigned b = a + 1u;
+    return (int)b;
+}
+""", set()),
+
+    # 反向：值来自输入，不是常量
+    ("ok_overflow_from_input", """
+int main() {
+    int a;
+    scanf("%d", &a);
+    int b = a + 1;
+    return b;
+}
+""", set()),
+
+    # 反向：函数调用后常量表作废（f 可能改 a）
+    ("ok_overflow_after_call", """
+int modify(int *p) { *p = 0; return 0; }
+int main() {
+    int a = 2147483647;
+    modify(&a);
+    int b = a + 1;
+    return b;
+}
+""", set()),
+
+    # 反向：重新赋值成非常量后，旧常量值必须失效
+    ("ok_overflow_reassigned", """
+int main() {
+    int a = 2147483647;
+    int t;
+    scanf("%d", &t);
+    a = t;
+    int b = a + 1;
+    return b;
+}
+""", set()),
+]

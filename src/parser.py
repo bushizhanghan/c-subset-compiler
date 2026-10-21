@@ -231,6 +231,10 @@ class Type:
     # 早期 parse_type 直接跳过 static，导致 W19 爆栈检查把
     # `static int a[1000000];` 也报成爆栈——那是合法且安全的。
     storage: str = ""
+    # long 标记。归一化后 long/short 的 base 都变成 int，
+    # 但溢出范围不同（long 是 64 位）。W14 需要这个信息，
+    # 否则 long 变量的常量运算会被按 int 范围误报。
+    long_flag: bool = False
 
     def __repr__(self):
         arr = "".join(f"[{d}]" for d in self.dims) if self.dims else (
@@ -399,6 +403,11 @@ class Parser:
             # 归一化会丢掉符号性，单独记下来：unsigned int 与 int
             # 在比较/赋值语义上不同，丢了就查不出混合符号比较。
             ty = Type(base=base, unsigned=("unsigned" in words))
+            # long 也单独记：归一化后 base 都是 int，但 long 的溢出
+            # 范围不同。W14 查常量溢出时需要知道"这个变量是 long"，
+            # 否则 `long a=2147483647; long b=a+1;` 会被误判 int 溢出。
+            if "long" in words:
+                ty.long_flag = True
             while self.at("*"):
                 self.advance()
                 ty.ptr += 1
