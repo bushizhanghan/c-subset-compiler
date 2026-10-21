@@ -47,6 +47,15 @@ ARG_REGS = ["ecx", "edx", "r8d", "r9d"]
 ARG_REGS64 = ["rcx", "rdx", "r8", "r9"]
 MAX_REG_ARGS = len(ARG_REGS)
 
+# 返回指针的库函数。detect_pointers 靠它把 `t1 = call malloc(4)`
+# 的 t1 也标成指针，否则接返回值时 mov eax 只搬低 32 位，
+# 堆地址高位丢失 → 野指针 → 0xC0000005（实测）。
+PTR_RETURNING_FUNCS = frozenset({
+    "malloc", "calloc", "realloc", "strdup", "strchr", "strrchr",
+    "strstr", "strtok", "memchr", "fgets", "getenv",
+    "fopen", "fdopen", "tmpfile", "bsearch",
+})
+
 SLOT = 8                 # 每个变量一个 8 字节栈槽（值为 32 位，指针为 64 位）
 SHADOW = 32              # Win64 调用者必须预留的影子空间
 
@@ -296,6 +305,15 @@ class FuncGen:
             changed = False
             for ins in self.instrs:
                 if ins.op == "addr" and ins.dst:
+                    if ins.dst not in ptr:
+                        ptr.add(ins.dst)
+                        changed = True
+                # malloc/calloc/realloc/strdup 返回指针。
+                # 不认这个，`int *p = malloc(4)` 里接返回值的临时变量
+                # 会被当标量，mov eax 只取低 32 位，堆地址高位一丢
+                # 就是野指针，运行直接 0xC0000005（实测）。
+                if ins.op == "call" and ins.dst \
+                        and ins.a1 in PTR_RETURNING_FUNCS:
                     if ins.dst not in ptr:
                         ptr.add(ins.dst)
                         changed = True
@@ -1182,6 +1200,50 @@ int main() {
     ("p36_printf_with_global", """#include <stdio.h>
 int g = 7;
 int main() { printf("g=%d\\n", g); return 0; }"""),
+    # ---- malloc / free（p37..p41）----
+    # 关键坑：malloc 返回 64 位指针，detect_pointers 必须把
+    # `t1 = call malloc(4)` 的 t1 也标成指针。漏了这步，
+    # 接返回值时 mov eax 只搬低 32 位，堆地址高位丢失 -> 野指针
+    # -> 0xC0000005 访问冲突（实测踩到）。
+    ("p37_malloc_basic", """#include <stdlib.h>
+int main() { int *p = malloc(4); *p = 42; return *p; }"""),
+    ("p38_malloc_array", """#include <stdlib.h>
+int main() {
+    int *p = malloc(sizeof(int) * 5);
+    int i = 0;
+    for (i = 0; i < 5; i = i + 1) { p[i] = i * 10; }
+    int s = 0;
+    for (i = 0; i < 5; i = i + 1) { s = s + p[i]; }
+    free(p);
+    return s;
+}"""),
+    ("p39_malloc_printf", """#include <stdio.h>
+#include <stdlib.h>
+int main() {
+    int *p = malloc(sizeof(int) * 3);
+    p[0] = 1; p[1] = 2; p[2] = 3;
+    printf("sum=%d\\n", p[0] + p[1] + p[2]);
+    free(p);
+    return 0;
+}"""),
+    ("p40_malloc_recursion", """#include <stdio.h>
+#include <stdlib.h>
+int fib(int n) { if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); }
+int main() {
+    int *p = malloc(sizeof(int));
+    *p = fib(10);
+    printf("fib=%d\\n", *p);
+    free(p);
+    return 0;
+}"""),
+    ("p41_calloc", """#include <stdlib.h>
+int main() {
+    int *p = calloc(3, sizeof(int));
+    p[0] = 5; p[1] = 6; p[2] = 7;
+    int s = p[0] + p[1] + p[2];
+    free(p);
+    return s;
+}"""),
 ]
 
 REPORT = os.path.join(ROOT, "tools", "codegen_report.md")
@@ -1396,6 +1458,7 @@ def write_report(rows, ok, total):
         "```",
         "",
     ]
+
     with open(REPORT, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines))
 

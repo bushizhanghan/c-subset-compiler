@@ -44,8 +44,13 @@
 | p34_printf_with_recursion | 0 | 0 | 一致 |  |
 | p35_printf_with_loop | 0 | 0 | 一致 |  |
 | p36_printf_with_global | 0 | 0 | 一致 |  |
+| p37_malloc_basic | 42 | 42 | 一致 |  |
+| p38_malloc_array | 100 | 100 | 一致 |  |
+| p39_malloc_printf | 0 | 0 | 一致 |  |
+| p40_malloc_recursion | 0 | 0 | 一致 |  |
+| p41_calloc | 18 | 18 | 一致 |  |
 
-合计：36/36 一致。
+合计：41/41 一致。
 
 ## 后端实现要点
 

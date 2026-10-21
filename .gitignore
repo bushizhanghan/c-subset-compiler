@@ -45,3 +45,8 @@ _gpush.py
 _token.txt
 _base.txt
 _local.txt
+
+# 一次性脚本
+_commit.py
+_push.py
+_gpush.py
