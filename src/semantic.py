@@ -540,6 +540,9 @@ class Analyzer:
         self._reported_e2 = set()
         # 已报过 W24 的位置，避免同一语句被多次检查重复报
         self._reported_w24 = set()
+        # 文件包含的标准头文件名（由 analyze() 从预处理结果传入）。
+        # W25 靠它判断"调了某函数但没 include 对应头文件"。
+        self._includes = []
         # 当前作用域深度，用于块作用域逃逸检测（W20）
         self._scope_depth = 0
         # 已知是常量的局部变量（W14b 用）。
@@ -2760,6 +2763,81 @@ class Analyzer:
 
     _SCANF_FAMILY = ("scanf", "sscanf", "fscanf")
 
+    # 标准库函数 -> 归属头文件。用于 W25 检查漏 include。
+    # 只收录"几乎没有争议"的映射，拿不准的不放。
+    FUNC_HEADER = {
+        "abs": "stdlib.h", "labs": "stdlib.h",
+        "atoi": "stdlib.h", "atol": "stdlib.h",
+        "malloc": "stdlib.h", "calloc": "stdlib.h",
+        "realloc": "stdlib.h", "free": "stdlib.h",
+        "exit": "stdlib.h", "rand": "stdlib.h", "srand": "stdlib.h",
+        "qsort": "stdlib.h", "bsearch": "stdlib.h",
+        "strlen": "string.h", "strcmp": "string.h",
+        "strncmp": "string.h", "strcpy": "string.h",
+        "strncpy": "string.h", "strcat": "string.h",
+        "strncat": "string.h", "strstr": "string.h",
+        "strchr": "string.h", "strrchr": "string.h",
+        "strtok": "string.h", "strdup": "string.h",
+        "strspn": "string.h", "strcspn": "string.h",
+        "memset": "string.h", "memcpy": "string.h",
+        "memmove": "string.h", "memcmp": "string.h",
+        "memchr": "string.h",
+        "printf": "stdio.h", "fprintf": "stdio.h",
+        "sprintf": "stdio.h", "snprintf": "stdio.h",
+        "scanf": "stdio.h", "fscanf": "stdio.h",
+        "sscanf": "stdio.h", "puts": "stdio.h",
+        "fputs": "stdio.h", "putchar": "stdio.h",
+        "getchar": "stdio.h", "fgets": "stdio.h",
+        "fopen": "stdio.h", "fclose": "stdio.h",
+        "fflush": "stdio.h", "perror": "stdio.h",
+        "isalpha": "ctype.h", "isdigit": "ctype.h",
+        "isspace": "ctype.h", "toupper": "ctype.h",
+        "tolower": "ctype.h",
+        "sqrt": "math.h", "pow": "math.h", "fabs": "math.h",
+        "sin": "math.h", "cos": "math.h", "floor": "math.h",
+        "ceil": "math.h",
+        "assert": "assert.h",
+    }
+
+    def _check_missing_include(self, fname, call):
+        """W25：调了标准库函数但没包含对应头文件。
+
+            bool f(int *a, int n, int k) {
+                ... abs(i - j) <= k ...      // 没 #include <stdlib.h>
+            }
+
+        gcc 报 "implicit declaration of function 'abs'"，是 error。
+        真实来源：老师在 stu_16 里标了这条。
+
+        保守规则（误报风险高，只报确凿的）：
+          - 只看 FUNC_HEADER 里明确归属的函数
+          - 如果文件里包含了非标准头（"mylib.h" / <windows.h>），
+            说明可能依赖预编译头或自建总头，不报
+          - 完全没有任何 include 时**要报** —— 这正是最典型的
+            漏头文件情形（实测 stu_16 就是零 include 直接调 abs）
+        """
+        hdr = self.FUNC_HEADER.get(fname)
+        if hdr is None:
+            return
+        incs = self._includes
+        # 标准化：只留文件名
+        have = set()
+        std_known = set(self.FUNC_HEADER.values())
+        has_nonstd = False
+        for inc in incs:
+            name = inc.replace("\\", "/").split("/")[-1]
+            have.add(name)
+            if name not in std_known:
+                has_nonstd = True
+        if hdr in have:
+            return
+        if has_nonstd:
+            return                       # 有自建头，可能已经间接包含
+        self.warn("W25", call.line, call.col,
+                  f"调用了 {fname}() 但没有 #include <{hdr}>",
+                  f"在文件开头补 #include <{hdr}>，"
+                  f"否则编译器会报隐式声明")
+
     def _check_format_args(self, fname, call):
         """W23：printf/scanf 的格式串与实参类型不匹配。
 
@@ -3024,6 +3102,8 @@ class Analyzer:
             self._check_format_args(name, call)
             # W23：格式串与参数类型不匹配
             self._check_format_args(name, call)
+            # W25：调标准库函数但没包含对应头文件
+            self._check_missing_include(name, call)
             # 返回类型查表；没登记的一律"未知"。
             # 早期这里默认 int，于是 fopen/strdup/strstr 的返回值被当成
             # 整数，赋给 FILE*/char* 变量就变成假警告（实测 nmakehlp 6 条）。
@@ -3125,8 +3205,12 @@ class Analyzer:
                   "或传数组元素 a[i]")
 
 
-def analyze(prog: Program) -> list:
-    return Analyzer().analyze(prog)
+def analyze(prog: Program, includes=None) -> list:
+    """跑语义分析。includes 是预处理记录的头文件名列表（供 W25 用）。"""
+    a = Analyzer()
+    if includes:
+        a._includes = list(includes)
+    return a.analyze(prog)
 
 
 if __name__ == "__main__":

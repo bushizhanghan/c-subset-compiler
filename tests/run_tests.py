@@ -255,11 +255,18 @@ def main():
             actual = actual_err
         ok = actual == expected
         if expected:
-            if actual & expected:
+            # 判定口径：期望的每个码都必须出现（子集判定）。
+            # 早期用 actual == expected 严格相等，导致"期望 W20、
+            # 实际 W20+W25"被判 FAIL，而统计那边用的是交集判定，
+            # 两边不一致（-v 显示 7 个 FAIL 但统计说 131/131）。
+            # 现在统一：期望集合必须是实际集合的子集。
+            ok = set(expected).issubset(set(actual))
+            if ok:
                 tp += 1
             else:
                 fn += 1
         else:
+            ok = not actual_err
             if actual_err:
                 fp += 1
             else:

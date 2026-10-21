@@ -907,3 +907,74 @@ int main() {
 int main() { EMPTY_MACRO; return 0; }
 """, set()),
 ]
+
+
+# ---- W25 调标准库函数但漏 include ----
+# 来源：老师在 stu_16 里标了这条（abs 需要 stdlib.h）。
+# gcc 报 "implicit declaration of function 'abs'"，是 error，
+# 但 csub 早期把 abs 当"已知标准库函数"直接放行，从没检查头文件。
+#
+# 判据保守：只看 FUNC_HEADER 里明确归属的函数；
+# 有非标准头（可能是预编译头/自建总头）就不报。
+EXTRA_CASES += [
+    # 应报
+    ("warn_missing_include_abs", """
+bool f(int *a, int n, int k) {
+    int i, j;
+    for (i = 0; i < n; i = i + 1) {
+        for (j = i + 1; j < n; j = j + 1) {
+            if (a[i] == a[j] && abs(i - j) <= k) { return true; }
+        }
+    }
+    return false;
+}
+""", {"W25"}),
+
+    ("warn_missing_include_with_other", """
+#include <stdio.h>
+int main() {
+    printf("hi");
+    return abs(-1);
+}
+""", {"W25"}),
+
+    ("warn_missing_string_h", """
+#include <stdio.h>
+int main() {
+    printf("%d", strlen("ab"));
+    return 0;
+}
+""", {"W25"}),
+
+    # 反向（不该报）
+    ("ok_include_stdlib", """
+#include <stdlib.h>
+int main() { return abs(-1); }
+""", set()),
+
+    ("ok_include_stdio", """
+#include <stdio.h>
+int main() { printf("hi"); return 0; }
+""", set()),
+
+    ("ok_include_string", """
+#include <string.h>
+int main() { return strlen("ab"); }
+""", set()),
+
+    ("ok_include_multi", """
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main() {
+    printf("%d", strlen("ab") + abs(-1));
+    return 0;
+}
+""", set()),
+
+    # 有自建头，可能是预编译头，不报
+    ("ok_include_custom_header", """
+#include "mylib.h"
+int main() { return abs(-1); }
+""", set()),
+]

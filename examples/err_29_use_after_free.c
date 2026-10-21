@@ -13,6 +13,8 @@
  * 分类：指针生命周期
  * ---------------------------------------------------------------
  */
+#include <stdlib.h>
+#include <stdio.h>
 int main() {
     int *p = malloc(2 * sizeof(int));
     int i;

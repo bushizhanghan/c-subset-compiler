@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """csub —— C 子集编译器与初学者错误诊断器（命令行入口）。
 
 用法:
@@ -91,7 +91,9 @@ def collect_diags(path, verbose=True):
     except ParseError as e:
         return remap_diags(
             [Diag("error", "SYN", e.line, e.col, e.msg)], pr), "parse", pr
-    return remap_diags(analyze(prog), pr), "semantic", pr
+    # 把预处理记录的头文件名传下去，W25（漏 include）要用
+    return remap_diags(analyze(prog, includes=pr.includes),
+                       pr), "semantic", pr
 
 
 def cmd_tokens(path):
