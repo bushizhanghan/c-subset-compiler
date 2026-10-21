@@ -2366,14 +2366,33 @@ class Analyzer:
                         if sym:
                             sym.initialized = True
                     elif isinstance(a, Ident):
-                        # 要求地址的函数收到裸变量名 = 真实错误
-                        if out_mode == "needs_addr_out":
+                        # 裸名传给 scanf：要看它是什么。
+                        #   标量变量 v      → 漏写 &，真错误
+                        #   数组名 a        → 数组退化成首地址，完全正确
+                        #   指针变量 p      → 值是地址，也正确
+                        # 早期不分青红皂白一律报 E16，导致
+                        # `char a[21]; scanf("%20s", a);` 这种标准写法
+                        # 被判成 ERROR（实测 stu_11，gcc 零诊断）。
+                        # 误报比漏报伤害大得多：学生会去改正确的代码。
+                        sym = self.scope.lookup(a.name)
+                        is_addr = False
+                        if sym is not None:
+                            vt = sym.vtype
+                            if vt is not None and (vt.array is not None
+                                                   or vt.dims
+                                                   or vt.ptr > 0):
+                                is_addr = True
+                        if is_addr:
+                            # 已经是地址，按正常表达式检查并标记已写入
+                            self.check_expr(a)
+                            if sym is not None:
+                                sym.initialized = True
+                        elif out_mode == "needs_addr_out":
                             self.err("E16", a.line, a.col,
                                      f"{name} 的输入参数需要取地址，"
                                      f"实际传的是变量 {a.name!r}",
                                      f"应写成 &{a.name}")
                         else:
-                            sym = self.scope.lookup(a.name)
                             if sym is not None:
                                 sym.initialized = True
                                 sym.used = True

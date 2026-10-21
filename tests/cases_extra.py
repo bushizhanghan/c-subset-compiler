@@ -403,6 +403,37 @@ int main() {
 }
 """, set()),
 
+    # scanf 传数组名不报 —— 数组名本身就退化成首地址。
+    # 这条是 stu_11 暴露的误报：E16 早期只要看到裸标识符就报，
+    # 把 `char a[21]; scanf("%20s", a);` 这种标准写法判成 ERROR，
+    # 而 gcc 零诊断。误报会让学生去改正确的代码，比漏报伤害大。
+    ("ok_scanf_array_arg", """
+int main() {
+    char a[21];
+    scanf("%20s", a);
+    return a[0];
+}
+""", set()),
+
+    # scanf 传指针变量也不报 —— 指针的值就是地址
+    ("ok_scanf_ptr_arg", """
+int main() {
+    char buf[10];
+    char *p = buf;
+    scanf("%9s", p);
+    return buf[0];
+}
+""", set()),
+
+    # scanf 传数组元素地址不报
+    ("ok_scanf_elem_addr", """
+int main() {
+    int a[5];
+    scanf("%d", &a[0]);
+    return a[0];
+}
+""", set()),
+
     # 非 void 函数 if 链缺兜底 return
     ("warn_missing_return", """
 int sign(int x) {
