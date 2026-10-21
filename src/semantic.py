@@ -691,6 +691,48 @@ class Analyzer:
         return False
 
     # ---- 声明 ----
+    def _check_stack_array(self, vd: VarDecl):
+        """W19：函数内声明超大数组 → 爆栈。
+
+        阈值 256KB（约 6.5 万个 int）。低于它的数组在栈上没问题；
+        高于它的在 Windows（1MB 栈）上极易崩，Linux（8MB）也危险。
+        全局变量和 static 不在栈上，不报。
+        """
+        if self.scope is self.globals:
+            return
+        ty = vd.vtype
+        if ty is None:
+            return
+        # static 局部变量在 .data/.bss，不在栈上，不爆栈
+        if getattr(ty, "storage", "") == "static":
+            return
+        # dims 是完整维度列表；array 是 dims[0] 的冗余副本。
+        # 早期把两者拼起来算，100000 算成 100000*100000（9765625KB）；
+        # 后来改成去重，又把 int[1000][1000] 的合法重复维度去成 1000。
+        # 正确做法：只信 dims，dims 为空时才退回 array。
+        dims = list(ty.dims or [])
+        if not dims:
+            if ty.array is None:
+                return
+            dims = [ty.array]
+        # 只对常量维度算总大小；含变量的维度算不出来，保守不报
+        total = 1
+        for d in dims:
+            if not isinstance(d, int) or d <= 0:
+                return
+            total *= d
+        # 元素大小
+        elem = {"char": 1, "short": 2, "int": 4, "long": 8,
+                "float": 4, "double": 8}.get(ty.base or "int", 4)
+        if ty.ptr:
+            elem = 8
+        nbytes = total * elem
+        if nbytes > 256 * 1024:
+            self.warn("W19", vd.line, vd.col,
+                      f"局部数组 {vd.name!r} 约 {nbytes // 1024}KB，"
+                      f"放在栈上很容易溢出（Windows 栈默认 1MB）",
+                      "改成全局变量、static，或用 malloc 分配")
+
     def check_vardecl(self, vd: VarDecl):
         # 重复声明
         if self.scope.lookup_local(vd.name):
@@ -699,6 +741,13 @@ class Analyzer:
                      f"变量 {vd.name!r} 重复声明",
                      f"上一次声明在 {old.line}:{old.col}")
             return
+
+        # W19：局部大数组爆栈
+        # `int a[1000000];` 在 main 里要 4MB，Windows 栈默认 1MB，
+        # 一进 main 就段错误。这是 OJ 学生的经典错误——他们看的是
+        # "内存限制 64MB" 却把数组放栈上（实测 stu_09，两个 100 万
+        # int 数组共 8MB，gcc 完全不报，一跑就崩）。
+        self._check_stack_array(vd)
 
         # 全局变量在 C 里默认零初始化，不存在"未初始化"问题。
         # 早期版本一视同仁，导致 Windows 代码里大量全局缓冲区

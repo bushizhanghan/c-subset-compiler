@@ -226,6 +226,11 @@ class Type:
     # 不保留的话 `unsigned int a` 和 `int a` 完全无法区分，
     # 混合比较这类真实缺陷就永远查不出来。
     unsigned: bool = False
+    # 存储类。static 关键：语义层要靠它区分"在栈上"和"不在栈上"
+    # （static 局部数组在 .data/.bss，局部自动变量在栈上）。
+    # 早期 parse_type 直接跳过 static，导致 W19 爆栈检查把
+    # `static int a[1000000];` 也报成爆栈——那是合法且安全的。
+    storage: str = ""
 
     def __repr__(self):
         arr = "".join(f"[{d}]" for d in self.dims) if self.dims else (
@@ -359,9 +364,19 @@ class Parser:
     def parse_type(self) -> Optional[Type]:
         # 存储类与限定符：static / const / extern / inline 不影响类型判断，
         # 直接跳过。真实代码里 static 函数和全局变量很常见。
+        # 但 static 要记下来：W19（爆栈检查）靠它区分栈上与 .data/.bss。
+        storage = ""
         while self.cur.kind == Tok.KW and self.cur.value in (
                 "static", "const", "extern", "inline", "register", "volatile"):
+            if self.cur.value == "static":
+                storage = "static"
             self.advance()
+        ty = self._parse_type_inner()
+        if ty is not None and storage:
+            ty.storage = storage
+        return ty
+
+    def _parse_type_inner(self) -> Optional[Type]:
         # 调用约定往往夹在类型和函数名之间
         self.skip_call_conv()
 
