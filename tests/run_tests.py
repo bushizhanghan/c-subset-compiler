@@ -171,7 +171,7 @@ int main() {
     # 挡住，看不到后面真正的错误。
     ("err_no_main", """
 int f() { return 0; }
-""", {"W17"}),
+""", set()),
 
     # ---- 语法/词法错误 ----
     ("err_syntax_semi", """

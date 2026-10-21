@@ -98,6 +98,11 @@ def _is_likely_external_macro(name: str) -> bool:
 # 标准库常量宏：真实代码里 NULL 到处都是，不认就会误报
 STD_MACROS = {"NULL": "0", "EOF": "-1", "EXIT_SUCCESS": "0",
               "EXIT_FAILURE": "1", "TRUE": "1", "FALSE": "0",
+              # stdbool.h 的 true/false。C23 起是关键字，此前是宏。
+              # LeetCode / PTA 的 bool 函数题极常见，
+              # 不认这两个就报"使用了未声明的变量 'true'"
+              # （实测 stu_15，而 gcc 因为自动包含 stdbool.h 零诊断）。
+              "true": "1", "false": "0",
               "CLOCK_MONOTONIC": "1", "CLOCK_REALTIME": "0",
               "SEEK_SET": "0", "SEEK_CUR": "1", "SEEK_END": "2",
               "RAND_MAX": "32767", "INT_MAX": "2147483647",
@@ -628,13 +633,19 @@ class Analyzer:
                      if f.body is not None and not f.name.startswith("_")]
         if len(pub_funcs) >= 2:
             return
-        # 单个函数且没有 main：多半是**作业里的一个函数片段**，
-        # 不是完整程序。报 error 会让 check/report 直接终止，
-        # 学生看不到后面真正的错误（实测 stu_02 就是这样被吃掉的）。
-        # 改成提示级：既说明情况，又不阻塞其他诊断。
-        self.warn("W17", 1, 1, "没有找到 main 函数",
-                 "如果这是完整程序，需要 int main() 作为入口；"
-                 "如果只是作业里的单个函数，可以忽略这条")
+        # 只有一个函数且没有 main：**完全不报**。
+        #
+        # 这条规则改过两次：
+        #   第一版：报 error —— 会终止检查，学生看不到后面的真实错误
+        #           （stu_02 被吃掉）
+        #   第二版：改成 warning 提示 —— 但连续三份 LeetCode 函数题
+        #           （stu_05 / stu_08 / stu_14）每份都报一次，
+        #           纯噪音。LeetCode/PTA 的函数题本来就不带 main。
+        #
+        # 现在的判断：**真实的完整程序几乎不会只包含一个非 main 函数**。
+        # 单个函数要么是作业片段，要么是库函数，两种都不该提示。
+        # 宁可漏掉"忘了写 main"，也不给每份函数题加一条噪音。
+        return
 
     # ---- 函数 ----
     def check_func(self, fn: FuncDef):

@@ -78,3 +78,6 @@ _vw*.py
 _fchk*.py
 _dbg*.py
 _final*.py
+
+_cm7.py
+_updw*.py
