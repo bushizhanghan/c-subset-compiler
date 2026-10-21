@@ -265,9 +265,21 @@ def _type_size(ty):
     return _scalar_size(base)
 
 
-def _scalar_size(base):
-    return {"char": 1, "short": 2, "int": 4,
-            "long": 8, "float": 4, "double": 8}.get(base, 4)
+def _elem_type_of(ty):
+    """数组/指针去掉一层后的元素类型。"""
+    if ty is None:
+        return None
+    ptr = getattr(ty, "ptr", 0)
+    if ptr > 0:
+        return Type(base=ty.base, ptr=ptr - 1)
+    dims = list(getattr(ty, "dims", None) or [])
+    if dims:
+        rest = dims[1:]
+        return Type(base=ty.base, ptr=0,
+                    dims=rest, array=(rest[0] if rest else None))
+    if getattr(ty, "array", None) is not None:
+        return Type(base=ty.base, ptr=0)
+    return Type(base=ty.base, ptr=0)
 
 
 def _is_array(ty):
@@ -309,6 +321,10 @@ class FuncGen:
         self.float_tmps = set()
         self._fconst_pool = {}
         self._fconst_data = []
+        # 结构体数组元素取址得到的临时量 -> 它指向的布局。
+        # a[0].x 里 gen_load 产出 t1 存 a[0] 的地址，
+        # 后续 setmem/getmem 要靠这张表知道 t1 是指向哪个结构体的。
+        self.struct_ptr_of = {}
 
     # ---- 汇编输出 ----
     def line(self, text):
@@ -391,6 +407,15 @@ class FuncGen:
                     if ins.dst not in ptr:
                         ptr.add(ins.dst)
                         changed = True
+                # 指针算术的结果也是指针（t1 = p + 1）。
+                # 不提前标记的话，alloc 会给它按 scalar 分配，
+                # generate 时 store_reg/load_operand 只搬 32 位。
+                if ins.op in ("+", "-") and ins.dst:
+                    a1p = (ins.a1 in ptr) or _is_array(self.types.get(ins.a1))
+                    a2p = (ins.a2 in ptr) or _is_array(self.types.get(ins.a2))
+                    if a1p != a2p and ins.dst not in ptr:
+                        ptr.add(ins.dst)
+                        changed = True
         return ptr
 
     def max_stack_args(self):
@@ -413,6 +438,19 @@ class FuncGen:
         off = 0
         for n in names:
             ty = self.types.get(n)
+            # 数组优先于结构体：`struct P a[3]` 是"结构体数组"，
+            # 要按数组分配（size = 元素数 × 元素大小），
+            # 不是按单个结构体分配。早期先判断结构体，导致
+            # 结构体数组只分到一个元素的槽位，下标访问被拒。
+            if _is_array(ty):
+                nbytes = _array_len(ty) * self._elem_stride(ty)
+                nbytes = max(nbytes, self._elem_stride(ty))
+                off += nbytes
+                off = (off + 7) // 8 * 8          # 8 字节对齐
+                self.slots[n] = off
+                self.kinds[n] = "array"
+                self.sizes[n] = nbytes
+                continue
             # 结构体变量要按布局大小分配，不能只给 8 字节
             _lay, _deref = self._struct_layout_of_type(ty)
             if _lay is not None and not _deref:
@@ -423,15 +461,7 @@ class FuncGen:
                 self.kinds[n] = "struct"
                 self.sizes[n] = nbytes
                 continue
-            if _is_array(ty):
-                nbytes = _array_len(ty) * _elem_size(ty)
-                nbytes = max(nbytes, _elem_size(ty))
-                off += nbytes
-                off = (off + 7) // 8 * 8          # 8 字节对齐
-                self.slots[n] = off
-                self.kinds[n] = "array"
-                self.sizes[n] = nbytes
-            elif n in self.ptr_names:
+            if n in self.ptr_names:
                 off += SLOT
                 self.slots[n] = off
                 self.kinds[n] = "ptr"
@@ -517,7 +547,11 @@ class FuncGen:
             # 早期直接报错，导致所有字符串函数都用不了。
             self.line(f"lea {R64.get(reg, reg)}, [rbp-{off}]")
             return
-        if self.kinds[s] == "ptr":
+        # 指针判据要同时看 kinds 和 ptr_names：
+        # 指针算术的临时量（t1 = p + 1）槽位在 alloc 时按 scalar 分配，
+        # 但运行期它装的是 64 位地址。只看 kinds 会用 mov eax 截断高位
+        # （实测 0xC0000005）。
+        if self.kinds[s] == "ptr" or s in self.ptr_names:
             self.line(f"mov {R64.get(reg, reg)}, QWORD PTR [rbp-{off}]")
         else:
             self.line(f"mov {reg}, DWORD PTR [rbp-{off}]")
@@ -642,6 +676,13 @@ class FuncGen:
             return
 
         if op in BIN_ALU:
+            # 指针算术要先缩放：C 里 `p + 1` 前进的是 sizeof(元素) 字节，
+            # 不是 1 字节。IR 里 p+1 就是普通加法（没有类型信息），
+            # 所以必须在后端补这一步，否则取到错位的元素（实测：
+            # `int *p = a; p = p + 1; return *p;` 直接 0xC0000005）。
+            if op in ("+", "-") and self._is_ptr_arith(ins):
+                self.gen_ptr_arith(ins)
+                return
             self.load_operand("eax", ins.a1)
             self.line(f"{BIN_ALU[op]} eax, {self.op2(ins.a2)}")
             self.store_reg(ins.dst)
@@ -736,7 +777,20 @@ class FuncGen:
 
         if op == "deref":
             self.lea_base("rdx", ins.a1)
-            self.line(f"mov eax, DWORD PTR [rdx]")
+            # 解引用宽度要按 pointee 的类型：char* 读 1 字节，
+            # int* 读 4 字节。早期一律 DWORD，char 指针会读到
+            # 相邻 3 个字节（实测 char* 解引用返回 -150060222）。
+            esz = self._elem_size_of_ptr(ins.a1)
+            if esz == 1:
+                self.line("movzx eax, BYTE PTR [rdx]")
+            elif esz == 8:
+                self.line("mov rax, QWORD PTR [rdx]")
+                off = self.slot(ins.dst)
+                self.line(f"mov QWORD PTR [rbp-{off}], rax")
+                self.ptr_names.add(ins.dst)
+                return
+            else:
+                self.line("mov eax, DWORD PTR [rdx]")
             self.store_reg(ins.dst)
             return
 
@@ -745,6 +799,70 @@ class FuncGen:
             return
 
         raise CodegenError(f"函数 {self.name}: 不支持的 IR 指令 '{ins}'")
+
+    def _is_ptr_arith(self, ins):
+        """这条 ± 是不是指针算术（一侧是指针/数组，另一侧是整数）。"""
+        if self._operand_is_ptr(ins.a1) and not self._operand_is_ptr(ins.a2):
+            return True
+        if self._operand_is_ptr(ins.a2) and not self._operand_is_ptr(ins.a1):
+            return True
+        return False
+
+    def _elem_size_of_ptr(self, name):
+        """指针指向的元素有多少字节。"""
+        ty = self.types.get(name)
+        if ty is None:
+            return 4
+        base = (ty.base or "int").replace("struct ", "")
+        if getattr(ty, "ptr", 0) > 1:
+            return 8                 # 指针的指针
+        if base.startswith("struct") or base in self.structs:
+            lay, _ = self._struct_layout_of_type(
+                type("T", (), {"base": ty.base, "ptr": 0})())
+            return lay["size"] if lay else 4
+        return _scalar_size(base)
+
+    def gen_ptr_arith(self, ins):
+        """指针加减整数：结果 = 指针 ± 整数 * sizeof(元素)。
+
+        `p + 1` 前进 sizeof(元素) 字节，不是 1 字节。
+        `1 + p` 交换操作数处理。
+        `p - q` 这种两个都是指针的情形不在此路径（返回的是元素个数差，
+        语义不同），调用方会走普通整数减法。
+        """
+        op = ins.op
+        if self._operand_is_ptr(ins.a1):
+            ptr_op, int_op = ins.a1, ins.a2
+        else:
+            ptr_op, int_op = ins.a2, ins.a1
+        esz = self._elem_size_of_ptr(ptr_op)
+        # 指针装 64 位
+        self.load_operand("rax", ptr_op)
+        if _is_int_literal(int_op):
+            n = int(int_op)
+        else:
+            self.load_operand("ecx", int_op)
+            n = None
+        if n is not None:
+            # 立即数直接乘
+            self.line(f"imul eax, {n * esz}" if False else
+                      f"mov ecx, {n * esz}")
+            self.line(f"{'add' if op == '+' else 'sub'} rax, rcx")
+        else:
+            self.line(f"imul ecx, {esz}")
+            # ecx 是有符号的，要符号扩展到 rcx 再参与 64 位运算
+            self.line("movsxd rcx, ecx")
+            self.line(f"{'add' if op == '+' else 'sub'} rax, rcx")
+        # 结果是指针（64 位），必须用 QWORD 存。
+        # 早期用 store_reg 走 scalar 路径，mov DWORD [rbp-x], eax
+        # 只存低 32 位，取回来就是野指针（实测 0xC0000005）。
+        self.ptr_names.add(ins.dst)
+        if ins.dst in getattr(self, "global_names", ()):
+            label = re.sub(r'[^0-9A-Za-z_]', '_', ins.dst)
+            self.line(f"mov QWORD PTR {label}[rip], rax")
+        else:
+            off = self.slot(ins.dst)
+            self.line(f"mov QWORD PTR [rbp-{off}], rax")
 
     def asm_label(self, name):
         return ".L" + re.sub(r"[^0-9A-Za-z_]", "_", f"{self.asm}_{name}")
@@ -944,6 +1062,9 @@ class FuncGen:
 
         可能是指针（q->x），要剥一层；返回 (布局表, 是否需解引用)。
         """
+        # 结构体数组元素取址得到的临时量：它本身就是地址
+        if name in self.struct_ptr_of:
+            return self.struct_ptr_of[name], True
         return self._struct_layout_of_type(self.types.get(name))
 
     def _struct_layout_of_type(self, ty):
@@ -1025,7 +1146,24 @@ class FuncGen:
             raise CodegenError(
                 f"函数 {self.name}: 对非数组/非指针 '{base}' 做下标访问")
         ty = self.types.get(base)
-        esz = _elem_size(ty) if ty is not None else 4
+        esz = self._elem_stride(ty) if ty is not None else 4
+        # 元素是结构体时，load 得到的是"元素地址"而不是值：
+        # a[0].x 需要 a[0] 的地址再按成员偏移访问。
+        _lay, _ = self._struct_layout_of_type(
+            _elem_type_of(ty) if ty is not None else None)
+        if _lay is not None:
+            self.lea_base("rdx", base)
+            if _is_int_literal(idx):
+                self.line(f"lea rax, [rdx+{int(idx) * esz}]")
+            else:
+                self.load_operand("ecx", idx)
+                self.line(f"lea rax, [rdx+rcx*{esz}]")
+            off = self.slot(ins.dst)
+            self.line(f"mov QWORD PTR [rbp-{off}], rax")
+            self.ptr_names.add(ins.dst)
+            # 记住这个临时量指向哪个结构体，供 getmem/setmem 查布局
+            self.struct_ptr_of[ins.dst] = _lay
+            return
         if esz == 1:
             load_ins = "movzx eax, BYTE PTR"
         else:
@@ -1034,9 +1172,19 @@ class FuncGen:
         if _is_int_literal(idx):
             self.line(f"{load_ins} [rdx+{int(idx) * esz}]")
         else:
-            self.load_operand("ecx", idx)
+            self.load_operand("ecx", "rdx" if False else idx)
             self.line(f"{load_ins} [rdx+rcx*{esz}]")
         self.store_reg(ins.dst)
+
+    def _elem_stride(self, ty):
+        """数组/指针的步长 = 元素大小。结构体元素要按布局算。"""
+        if ty is None:
+            return 4
+        elem = _elem_type_of(ty)
+        lay, _ = self._struct_layout_of_type(elem)
+        if lay is not None:
+            return lay["size"]
+        return _elem_size(ty)
 
     def gen_store(self, ins):
         base, idx, val = ins.extra, ins.a1, ins.a2
@@ -1653,6 +1801,73 @@ int main() {
     p.x = 3; p.y = 4;
     printf("sum=%d\\n", p.x + p.y);
     return 0;
+}"""),
+    # ---- 指针算术缩放（p53..p57）----
+    # C 里 p+1 前进 sizeof(元素) 字节，IR 里 p+1 是普通加法，
+    # 所以必须在后端补缩放。踩到两个坑：
+    #   1. 不缩放：p+1 只前进 1 字节，取到错位数据 -> 0xC0000005
+    #   2. 缩放对了但用 mov DWORD 存结果，64 位地址被截断
+    #      -> 还是 0xC0000005。必须看 kinds 和 ptr_names 两个判据。
+    ("p53_ptr_add1", """int main() {
+    int a[3];
+    a[0] = 10; a[1] = 20; a[2] = 30;
+    int *p = a;
+    p = p + 1;
+    return *p;
+}"""),
+    ("p54_ptr_sub1", """int main() {
+    int a[3];
+    a[0] = 10; a[1] = 20; a[2] = 30;
+    int *p = a + 2;
+    p = p - 1;
+    return *p;
+}"""),
+    ("p55_ptr_add2", """int main() {
+    int a[3];
+    a[0] = 10; a[1] = 20; a[2] = 30;
+    int *p = a;
+    p = p + 2;
+    return *p;
+}"""),
+    ("p56_ptr_walk_sum", """int main() {
+    int a[4];
+    int i = 0;
+    int s = 0;
+    for (i = 0; i < 4; i = i + 1) { a[i] = i * 10; }
+    int *p = a;
+    for (i = 0; i < 4; i = i + 1) {
+        s = s + *p;
+        p = p + 1;
+    }
+    return s;
+}"""),
+    ("p57_char_ptr_stride", """int main() {
+    char a[3];
+    a[0] = 65; a[1] = 66; a[2] = 67;
+    char *p = a;
+    p = p + 1;
+    return *p;
+}"""),
+    # ---- 结构体数组（p58..p60）----
+    # 两个坑：数组判断要优先于结构体判断（否则按单个结构体分配
+    # 一个槽位）；gen_load 对结构体元素要产出"地址"而不是值。
+    ("p58_struct_array_one", """struct P { int x; };
+int main() {
+    struct P a[3];
+    a[0].x = 5;
+    return a[0].x;
+}"""),
+    ("p59_struct_array_many", """struct P { int x; };
+int main() {
+    struct P a[3];
+    a[0].x = 1; a[1].x = 2; a[2].x = 3;
+    return a[0].x * 100 + a[1].x * 10 + a[2].x;
+}"""),
+    ("p60_struct_array_two_members", """struct P { int x; int y; };
+int main() {
+    struct P a[2];
+    a[1].x = 7; a[1].y = 8;
+    return a[1].x + a[1].y;
 }"""),
 ]
 

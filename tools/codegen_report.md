@@ -60,8 +60,16 @@
 | p50_struct_ptr | 7 | 7 | 一致 |  |
 | p51_struct_three | 123 | 123 | 一致 |  |
 | p52_struct_printf | 0 | 0 | 一致 |  |
+| p53_ptr_add1 | 20 | 20 | 一致 |  |
+| p54_ptr_sub1 | 20 | 20 | 一致 |  |
+| p55_ptr_add2 | 30 | 30 | 一致 |  |
+| p56_ptr_walk_sum | 60 | 60 | 一致 |  |
+| p57_char_ptr_stride | 66 | 66 | 一致 |  |
+| p58_struct_array_one | 5 | 5 | 一致 |  |
+| p59_struct_array_many | 123 | 123 | 一致 |  |
+| p60_struct_array_two_members | 15 | 15 | 一致 |  |
 
-合计：52/52 一致。
+合计：60/60 一致。
 
 ## 后端实现要点
 
