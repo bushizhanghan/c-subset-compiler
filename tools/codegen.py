@@ -15,6 +15,14 @@
   - 整型参数寄存器：rcx, rdx, r8, r9；返回值 eax
   - 调用者预留 32 字节影子空间（shadow space），栈在 call 处 16 字节对齐
   - 不生成 .seh_* 展开指令（纯计算函数用不到；实测能正常链接运行）
+
+支持范围（本轮扩展后）:
+  - 全局变量：顶层声明进 .data（有初值）/ .bss（无初值），RIP 相对寻址
+  - 基础库函数：直接 call libc 真实符号（printf 的整数最小子集、puts、
+    putchar、strlen/memcpy 一族），字符串字面量进 .rodata
+  - 浮点最小支持：float 字面量 + 一次四则运算，走 xmm0（movss/addss/...），
+    在 int 边界上用 cvttss2si / cvtsi2ss 转换
+  仍然明确拒绝：double、结构体、指针算术缩放、多维数组寻址。
 """
 import argparse
 import os
@@ -29,7 +37,7 @@ from parser import (                                     # noqa: E402
     While, For, Return, Break, Continue, ExprStmt, DoWhile, Switch, Case,
     Label, Goto, Type,
 )
-from semantic import analyze                              # noqa: E402
+from semantic import analyze, const_int                  # noqa: E402
 from ir import IRGen, const_fold, dead_code_elim          # noqa: E402
 
 # Windows x64 整型参数寄存器（System V 的 rdi/rsi 在这里是错的）

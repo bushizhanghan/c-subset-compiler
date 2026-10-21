@@ -144,6 +144,7 @@ class ExprStmt(Node):
 class Num(Node):
     value: object = None
     is_float: bool = False
+    suffix: str = ""    # L/U/UL 等，用于 int vs long vs unsigned
 
 
 @dataclass
@@ -1199,7 +1200,8 @@ class Parser:
             self.advance()
             v = t.value
             if v.lower().startswith("0x"):
-                return Num(line=t.line, col=t.col, value=_safe_int(v, 16))
+                return Num(line=t.line, col=t.col,
+                           value=_safe_int(v, 16), suffix=t.suffix)
             if "." in v or "e" in v.lower():
                 try:
                     return Num(line=t.line, col=t.col, value=float(v),
@@ -1207,7 +1209,8 @@ class Parser:
                 except (ValueError, OverflowError):
                     return Num(line=t.line, col=t.col, value=0.0,
                                is_float=True)
-            return Num(line=t.line, col=t.col, value=_safe_int(v, 10))
+            return Num(line=t.line, col=t.col,
+                       value=_safe_int(v, 10), suffix=t.suffix)
         if t.kind == Tok.STR:
             self.advance()
             # C 里相邻字符串字面量会自动拼接："abc" "def" == "abcdef"

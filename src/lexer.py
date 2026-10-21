@@ -1,4 +1,4 @@
-﻿"""词法分析器。
+"""词法分析器。
 
 设计目标：教学用，所以每个 token 都带行列号，方便把错误指回源码位置。
 不做 C 的完整词法（不处理预处理指令、不处理字符常量转义的全部情形），
@@ -46,6 +46,8 @@ class Token:
     value: str
     line: int
     col: int
+    # 数字后缀（L/U/UL/F），用于区分 int / long / unsigned / float
+    suffix: str = ""
 
     def __repr__(self):
         return f"{self.kind.name}({self.value!r})@{self.line}:{self.col}"
@@ -159,7 +161,8 @@ def tokenize(src: str):
                 # 100UL 仍是整数；但 5f 这种少见写法按浮点处理
                 if "f" in src[suf_start:i].lower() and "." not in raw_num:
                     is_float = True
-            toks.append(Token(Tok.NUM, raw_num, sl, sc))
+            suffix = src[suf_start:i] if i > suf_start else ""
+            toks.append(Token(Tok.NUM, raw_num, sl, sc, suffix=suffix))
             continue
 
         # 标识符与关键字

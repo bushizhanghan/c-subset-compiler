@@ -210,6 +210,69 @@ def const_int(node, _depth=0):
     return None
 
 
+INT_MAX = 2147483647
+INT_MIN = -2147483648
+
+# 逐字面量最大位数（截断阈值），超过的值不做溢出判断（parser 已截断）
+_SAFE_INT_MAX_DIGITS = 4000
+
+
+def check_const_overflow(node, _depth=0):
+    """检查常量表达式是否溢出 int 范围。
+
+    返回 (value, overflow)：
+      value    计算结果（Python 无限精度，不会自己溢出）
+      overflow bool，是否超出 [-2147483648, 2147483647]
+
+    只看**编译期可算出**的表达式。运行时变量的溢出不做判断。
+
+    踩过的坑：不能直接改 const_int——它是数组越界、switch 标签
+    等检查的底层工具，改它会让一大堆现有检查静默失效。
+    """
+    if _depth > 20:
+        return (None, False)
+    if isinstance(node, Num) and not node.is_float:
+        suf = (node.suffix or "").lower()
+        if "l" in suf or "u" in suf:
+            return (int(node.value), False)
+        v = int(node.value)
+        if len(str(v).lstrip("-")) > _SAFE_INT_MAX_DIGITS:
+            return (v, False)
+        return (v, v > INT_MAX or v < INT_MIN)
+    if isinstance(node, UnOp) and node.op in ("-", "+"):
+        v, ov = check_const_overflow(node.operand, _depth + 1)
+        if v is None:
+            return (None, False)
+        r = -v if node.op == "-" else v
+        return (r, ov or r > INT_MAX or r < INT_MIN)
+    if isinstance(node, BinOp) and node.op in ("+", "-", "*", "<<", ">>"):
+        a, ova = check_const_overflow(node.left, _depth + 1)
+        b, ovb = check_const_overflow(node.right, _depth + 1)
+        if a is None or b is None:
+            return (None, False)
+        # 操作数本身是 long/unsigned → 整个表达式不判溢出
+        lf = (node.left.suffix or "").lower() if isinstance(node.left, Num) else ""
+        rf = (node.right.suffix or "").lower() if isinstance(node.right, Num) else ""
+        if "l" in lf or "u" in lf or "l" in rf or "u" in rf:
+            return (None, False)
+        try:
+            if node.op == "+":
+                r = a + b
+            elif node.op == "-":
+                r = a - b
+            elif node.op == "*":
+                r = a * b
+            elif node.op == "<<":
+                r = a << b
+            else:
+                r = a >> b
+            return (r, ova or ovb or r > INT_MAX or r < INT_MIN)
+        except (ValueError, OverflowError):
+            return (None, False)
+    # 除法/取模/位运算/比较不产生溢出（结果在操作数范围内）
+    return (None, False)
+
+
 class VT(str):
     """表达式的推导类型：基类型名（仍是 str）+ 结构信息。
 
@@ -820,10 +883,9 @@ class Analyzer:
                 self.check_stmt(s.els)
         elif isinstance(s, While):
             self.check_condition(s.cond, "while")
+            # W15：条件变量在循环体内从未被修改 → 死循环
+            self.check_loop_advance(s, "while")
             # 豁免：条件里含函数调用时，空循环体几乎总是故意的。
-            # 经典写法 while (getchar() != '\n');  清空输入缓冲区，
-            # 条件本身有副作用，循环体空是对的。
-            # 不加这条豁免，hw_josephus.c 会一下冒出 4 个误报。
             if self._is_empty_body(s.body) and not _has_call(s.cond):
                 self.warn("W13", s.line, s.col,
                           "while 的循环体是空语句",
@@ -849,13 +911,12 @@ class Analyzer:
                 self.check_stmt(s.stmt)
         elif isinstance(s, For):
             self.push()
-            # for 的 init 可能是 VarDecl 也可能是 ExprStmt，
-            # 后者走 check_stmt 才会把 i=0 记为"已初始化"。
-            # 早期版本对 ExprStmt 只调 check_expr，导致 i 一直算未初始化。
             if s.init is not None:
                 self.check_stmt(s.init)
             if s.cond is not None:
                 self.check_condition(s.cond, "for")
+                # W15：for 的 step 也不推进 → 死循环（i-- 方向反了）
+                self.check_loop_advance(s, "for")
             if s.step is not None:
                 self.check_expr(s.step)
             self.loop_depth += 1
@@ -999,6 +1060,16 @@ class Analyzer:
             return _vt_of_type(sym.vtype, decay=True)
 
         if isinstance(e, BinOp):
+            # W14：常量表达式整数溢出
+            # gcc 的 -Woverflow 在编译期算得出来的情况会报，
+            # csub 目前完全不查——这是确定性缺陷。
+            _, _ov = check_const_overflow(e)
+            if _ov:
+                _val, _ = check_const_overflow(e)
+                self.warn("W14", e.line, e.col,
+                          f"常量表达式溢出 int 范围"
+                          f"（结果 {_val}，合法范围 {INT_MIN} ~ {INT_MAX}）",
+                          "结果会被截断，实际值和你预期的不一样")
             lt = self.check_expr(e.left)
             rt = self.check_expr(e.right)
             # 除零 / 模零
@@ -1633,6 +1704,198 @@ class Analyzer:
         if isinstance(stmt, _B):
             return len(stmt.stmts) == 0
         return False
+    def check_loop_advance(self, s, ctx):
+        """W15：循环无法正常终止。
+
+        两类检测：
+        A) 条件变量在循环体内从未被修改 → 死循环
+        B) for 的 step 方向与条件方向相反 → 死循环
+           （for (i=0; i<10; i--) 中 i-- 在往下走，条件要求往上走）
+        """
+        if _has_call(s.cond):
+            return
+        conds = []
+        self._collect_cmp_idents(s.cond, conds)
+        if not conds:
+            return
+        modified = set()
+        has_exit = [False]
+        self._collect_loop_effects(s.body, modified, has_exit)
+        if hasattr(s, "step") and s.step is not None:
+            self._collect_loop_effects(s.step, modified, has_exit)
+            # B) for 方向检查
+            self._check_for_direction(s, conds)
+        if has_exit[0]:
+            return
+        unmodified = [c for c in conds if c not in modified]
+        if unmodified:
+            self.warn("W15", s.line, s.col,
+                      f"循环条件里的变量 {'、'.join(unmodified)} 在循环体内"
+                      f"从未被修改，可能是死循环",
+                      "在循环体内添加 i = i + 1，或加 break")
+
+    def _check_for_direction(self, s, conds):
+        """for (i=0; i<10; i--) → step 方向与条件方向相反 → 死循环。
+
+        只在"循环至少会执行一次"时才报：
+        - i=0; i<10; i-- → 进入循环后永远到不了 10（死循环）
+        - i=0; i>10; i++ → 条件一开始就 false，循环不进入，不是死循环
+        """
+        step = s.step
+        if step is None or s.cond is None:
+            return
+        step_var, step_dir = self._parse_step(step)
+        if step_var is None or step_dir == 0:
+            return
+        cond_var, cond_dir = self._parse_cond_dir(s.cond)
+        if cond_var is None or cond_dir == 0:
+            return
+        if cond_var != step_var:
+            return
+        # 循环是否至少进入一次：检查 init 值是否满足条件
+        init_val = self._get_for_init_value(s, step_var)
+        if init_val is not None:
+            bound = self._get_cond_bound(s.cond)
+            if bound is not None:
+                if cond_dir > 0 and not (init_val < bound):
+                    return  # 条件一开始就不满足
+                if cond_dir < 0 and not (init_val > bound):
+                    return  # 条件一开始就不满足
+        # step 递减 + 条件递增 → 永远到不了条件
+        if step_dir < 0 and cond_dir > 0:
+            self.warn("W15", s.line, s.col,
+                      f"for 循环的 step 是递减（{step_var}--），"
+                      f"但条件要求递增（{step_var} < N）",
+                      "改成 i++ 或把条件改成 i > N")
+        elif step_dir > 0 and cond_dir < 0:
+            self.warn("W15", s.line, s.col,
+                      f"for 循环的 step 是递增（{step_var}++），"
+                      f"但条件要求递减（{step_var} > N）",
+                      "改成 i-- 或把条件改成 i < N")
+
+    def _get_for_init_value(self, s, var):
+        """从 for 的 init 里取变量的初始值（如果是常量）。"""
+        if s.init is None:
+            return None
+        node = s.init
+        if isinstance(node, VarDecl) and node.name == var and node.init:
+            return const_int(node.init)
+        if isinstance(node, ExprStmt) and isinstance(node.expr, Assign):
+            if (isinstance(node.expr.target, Ident)
+                    and node.expr.target.name == var):
+                return const_int(node.expr.value)
+        return None
+
+    def _get_cond_bound(self, cond):
+        """从条件里取常量边界值。"""
+        if isinstance(cond, BinOp) and cond.op in ("<", "<=", ">", ">="):
+            if isinstance(cond.right, Num):
+                return int(cond.right.value)
+            if isinstance(cond.left, Num):
+                return int(cond.left.value)
+        return None
+
+    def _parse_step(self, step):
+        """解析 step 表达式，返回 (变量名, 方向)。
+        i-- → ('i', -1)；i++ → ('i', +1)；i -= 1 → ('i', -1)；
+        i = i - 1 → ('i', -1)；i = i + 1 → ('i', +1)。"""
+        if isinstance(step, UnOp) and step.op in ("post--", "--"):
+            if isinstance(step.operand, Ident):
+                return (step.operand.name, -1)
+        if isinstance(step, UnOp) and step.op in ("post++", "++"):
+            if isinstance(step.operand, Ident):
+                return (step.operand.name, +1)
+        if isinstance(step, Assign):
+            if isinstance(step.target, Ident):
+                # i -= 1 / i += 1
+                if step.op == "-=":
+                    return (step.target.name, -1)
+                if step.op == "+=":
+                    return (step.target.name, +1)
+                # i = i - 1 / i = i + 1（值是 BinOp）
+                if step.op == "=" and isinstance(step.value, BinOp):
+                    if step.value.op == "-" and isinstance(step.value.right, Num):
+                        return (step.target.name, -1)
+                    if step.value.op == "+" and isinstance(step.value.right, Num):
+                        return (step.target.name, +1)
+        return (None, 0)
+
+    def _parse_cond_dir(self, cond):
+        """解析条件，返回 (变量名, 方向)。
+        i < N → ('i', +1)；i <= N → ('i', +1)；
+        i > N → ('i', -1)；i >= N → ('i', -1)。"""
+        if isinstance(cond, BinOp) and cond.op in ("<", "<="):
+            if isinstance(cond.left, Ident):
+                return (cond.left.name, +1)
+        if isinstance(cond, BinOp) and cond.op in (">", ">="):
+            if isinstance(cond.left, Ident):
+                return (cond.left.name, -1)
+        return (None, 0)
+
+    def _collect_cmp_idents(self, node, out, _depth=0):
+        """收集比较表达式里"应该被推进"的变量。
+
+        只在「变量 vs 常量」的比较中收集（如 while (i < 10)）。
+        `cur != head` / `cur->num != S` 这种两端都是变量/成员的比较，
+        head/S 是比较目标，不该被要求修改——如果不收窄就会误报。
+        """
+        if node is None or _depth > 30:
+            return
+        if isinstance(node, BinOp) and node.op in ("<", ">", "<=", ">="):
+            l, r = node.left, node.right
+            if isinstance(l, Ident) and isinstance(r, Num):
+                out.append(l.name)
+            elif isinstance(r, Ident) and isinstance(l, Num):
+                out.append(r.name)
+            return
+        if isinstance(node, BinOp) and node.op in ("==", "!="):
+            l, r = node.left, node.right
+            if isinstance(l, Ident) and isinstance(r, Num):
+                out.append(l.name)
+            elif isinstance(r, Ident) and isinstance(l, Num):
+                out.append(r.name)
+            return
+        for attr in ("left", "right", "operand", "cond", "then", "els"):
+            child = getattr(node, attr, None)
+            if child is None:
+                continue
+            if isinstance(child, list):
+                for c in child:
+                    self._collect_cmp_idents(c, out, _depth + 1)
+            else:
+                self._collect_cmp_idents(child, out, _depth + 1)
+
+    def _collect_loop_effects(self, node, modified, has_exit, _depth=0):
+        """扫描循环体：哪些变量被赋值、是否有退出路径。"""
+        if node is None or _depth > 40:
+            return
+        name = type(node).__name__
+        if name in ("Break", "Goto", "Return"):
+            has_exit[0] = True
+            return
+        if name == "Call":
+            has_exit[0] = True
+            return
+        if name == "Assign" and node.target:
+            if isinstance(node.target, Ident):
+                modified.add(node.target.name)
+            elif isinstance(node.target, UnOp) and node.target.op == "*":
+                has_exit[0] = True
+        if name == "UnOp" and node.op in ("++", "--", "post++", "post--"):
+            if isinstance(node.operand, Ident):
+                modified.add(node.operand.name)
+        for attr in ("body", "stmts", "then", "els", "value", "target",
+                     "init", "cond", "step", "left", "right", "operand",
+                     "base", "idx", "args", "func", "expr"):
+            child = getattr(node, attr, None)
+            if child is None:
+                continue
+            if isinstance(child, list):
+                for c in child:
+                    self._collect_loop_effects(c, modified, has_exit, _depth + 1)
+            else:
+                self._collect_loop_effects(child, modified, has_exit, _depth + 1)
+
     def check_lvalue(self, e):
         """左值检查：只验证"这个标识符存不存在"，不检查是否已初始化。
 
