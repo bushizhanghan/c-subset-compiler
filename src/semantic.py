@@ -674,13 +674,16 @@ class Analyzer:
             return                      # 仅声明
         self.cur_func = fn
         self.push()
+        param_syms = []
         for pty, pname in fn.params:
             if not pname:
                 continue
-            self.scope.declare(Symbol(
+            sym = Symbol(
                 name=pname, vtype=pty, kind="param",
-                initialized=True, used=True,
-                line=fn.line, col=fn.col))
+                initialized=True, used=False,
+                line=fn.line, col=fn.col)
+            self.scope.declare(sym)
+            param_syms.append(sym)
         self.check_block(fn.body, new_scope=False)
 
         # 非 void 函数必须有返回值。
@@ -699,6 +702,32 @@ class Analyzer:
                       f"{who} 函数可能没有 return 语句", hint)
         # W18：递归无法到达基线条件 → 无限递归
         self.check_recursion_terminates(fn)
+        # W28：参数声明了但从未使用
+        # 对应 gcc 的 -Wunused-parameter（需 -Wextra 才开）。
+        # 真实来源：stu_20 的 LeetCode 签名带了 returnSize /
+        # returnColumnSizes 两个参数，学生完全没用 —— gcc 报了
+        # 两条 warning，csub 没有这条规则。
+        #
+        # 豁免（宁可漏报也不误报）：
+        #   - main 函数不查（argv/argc 签名固定）
+        #   - 单参数函数不查（可能是回调签名要求的）
+        #   - 以 _ 开头或名字含 unused 的参数不查（约定俗成）
+        if fn.name != "main" and len(param_syms) >= 2:
+            for sym in param_syms:
+                if sym.used:
+                    continue
+                # 可变参数的 "..." 会被当成参数名，跳过。
+                # 实测 real_fortranobject.c:1367 报出
+                # "参数 '...' 声明了但从未使用" —— 纯误报。
+                if sym.name in ("...", "va_list"):
+                    continue
+                low = sym.name.lower()
+                if sym.name.startswith("_") or "unused" in low:
+                    continue
+                self.warn("W28", sym.line, sym.col,
+                          f"参数 {sym.name!r} 声明了但从未使用",
+                          "如果确实用不到，删掉它；"
+                          "如果是为了匹配函数签名，改名加 _ 前缀或标注用途")
         self.pop()
         self.cur_func = None
 
@@ -3271,12 +3300,26 @@ class Analyzer:
             return None
 
         # 参数个数检查（有函数体时才严格，声明可能省略形参名）
-        expected = len(fn.params)
+        # 可变参数函数（f(int a, ...)）只要求达到固定参数个数，
+        # 多传的算给 ...。早期一律要求相等，`f(1, "x", 2)` 这种
+        # 合法调用会被报 E4（实测 ok_param_varargs 触发）。
+        # parser 把 ... 记成 (Type('varargs'), '...')。
+        fixed = [p for p in fn.params if p[1] and p[1] != "..."]
+        has_varargs = any(p[1] == "..." for p in fn.params)
+        expected = len(fixed)
         got = len(call.args)
-        if fn.body is not None and expected != got:
-            self.err("E4", call.line, call.col,
-                     f"函数 {name!r} 需要 {expected} 个参数，但传了 {got} 个",
-                     "对照函数定义检查调用")
+        if fn.body is not None:
+            if has_varargs:
+                if got < expected:
+                    self.err("E4", call.line, call.col,
+                             f"函数 {name!r} 至少需要 {expected} 个参数，"
+                             f"但传了 {got} 个",
+                             "对照函数定义检查调用")
+            elif expected != got:
+                self.err("E4", call.line, call.col,
+                         f"函数 {name!r} 需要 {expected} 个参数，"
+                         f"但传了 {got} 个",
+                         "对照函数定义检查调用")
         for i, a in enumerate(call.args):
             at = self.check_expr(a)
             # 实参类型比对：个数对上了不代表类型对。

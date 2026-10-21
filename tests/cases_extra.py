@@ -1098,3 +1098,56 @@ char* f() {
 int* f(int *p) { return &p[0]; }
 """, set()),
 ]
+
+
+# ---- W28 参数声明了但从未使用 ----
+# 对应 gcc 的 -Wunused-parameter（需 -Wextra 才开）。
+# 真实来源：stu_20 的 LeetCode 签名带 returnSize / returnColumnSizes
+# 两个参数，学生完全没用。gcc 报两条 warning，csub 之前没有这条。
+EXTRA_CASES += [
+    # 应报
+    ("warn_unused_param", """
+int f(int a, int b) { return a; }
+int main() { return f(1, 2); }
+""", {"W28"}),
+
+    ("warn_unused_param_two", """
+int g(int x, int y, int z) { return x + y; }
+int main() { return g(1, 2, 3); }
+""", {"W28"}),
+
+    # 反向（不该报）
+    ("ok_param_all_used", """
+int f(int a, int b) { return a + b; }
+int main() { return f(1, 2); }
+""", set()),
+
+    # 单参数不用：可能是回调签名要求的
+    ("ok_param_single_unused", """
+int cb(int x) { return 0; }
+int main() { return cb(1); }
+""", set()),
+
+    # main 的 argv/argc 签名固定
+    ("ok_param_main_args", """
+int main(int argc, char **argv) { return 0; }
+""", set()),
+
+    # _ 前缀是约定俗成的"我知道不用"
+    ("ok_param_underscore", """
+int f(int a, int _b) { return a; }
+int main() { return f(1, 2); }
+""", set()),
+
+    # 名字里含 unused 也是约定
+    ("ok_param_unused_name", """
+int f(int a, int unused_x) { return a; }
+int main() { return f(1, 2); }
+""", set()),
+
+    # 可变参数的 ... 不是参数名
+    ("ok_param_varargs", """
+int f(int a, ...) { return a; }
+int main() { return f(1); }
+""", set()),
+]
