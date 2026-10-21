@@ -1151,3 +1151,78 @@ int f(int a, ...) { return a; }
 int main() { return f(1); }
 """, set()),
 ]
+
+
+# ---- W29 malloc 分配不足却用变量下标 ----
+# 来源：老师在 stu_22 里标为★致命：
+#     int *ans = (int*)malloc(sizeof(int));   // 只分了 4 字节
+#     for (i = 0; i < numsSize; i++) { ans[i] = count; }
+# gcc 不报这类（它只查类型不查大小）。
+#
+# 判据很窄：必须是 malloc/calloc 来的、字节数是常量、
+# 算出来的元素个数 <= 1、且用变量下标访问。
+EXTRA_CASES += [
+    # 应报
+    ("warn_malloc_one_elem", """
+#include <stdlib.h>
+int main() {
+    int n = 5;
+    int *p = (int *)malloc(sizeof(int));
+    int i;
+    for (i = 0; i < n; i = i + 1) { p[i] = 0; }
+    return 0;
+}
+""", {"W29"}),
+
+    ("warn_malloc_one_elem_assign", """
+#include <stdlib.h>
+int main() {
+    int n = 3;
+    int *p;
+    p = (int *)malloc(sizeof(int));
+    int i;
+    for (i = 0; i < n; i = i + 1) { p[i] = 1; }
+    return 0;
+}
+""", {"W29"}),
+
+    # 反向（不该报）
+    ("ok_malloc_sizeof_n", """
+#include <stdlib.h>
+int main() {
+    int n = 5;
+    int *p = (int *)malloc(sizeof(int) * n);
+    int i;
+    for (i = 0; i < n; i = i + 1) { p[i] = 0; }
+    return 0;
+}
+""", set()),
+
+    ("ok_malloc_sizeof_100", """
+#include <stdlib.h>
+int main() {
+    int *p = (int *)malloc(sizeof(int) * 100);
+    int i;
+    for (i = 0; i < 100; i = i + 1) { p[i] = 0; }
+    return 0;
+}
+""", set()),
+
+    ("ok_malloc_const_index", """
+#include <stdlib.h>
+int main() {
+    int *p = (int *)malloc(4);
+    p[0] = 1;
+    return p[0];
+}
+""", set()),
+
+    ("ok_plain_array", """
+int main() {
+    int a[10];
+    int i;
+    for (i = 0; i < 10; i = i + 1) { a[i] = 0; }
+    return 0;
+}
+""", set()),
+]

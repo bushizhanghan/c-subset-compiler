@@ -178,28 +178,48 @@ def tokenize(src: str):
             continue
 
         # 字符常量 'a' / '\n'，真实代码里极常见（如 scanf(" %c", &c)）
+        # 也允许**多字符常量** 'ans'（C 合法，但值实现定义，gcc 只给
+        # -Wmultichar 警告）。早期只读一个字符就要求闭合引号，
+        # 于是 `{'ans''ans2'}` 被判成"字符常量未闭合"（实测 stu_21），
+        # 而 gcc 认它只是"多字符常量" + 后面语法断了。
         if c == "'":
             sl, sc = line, col
             i += 1
             col += 1
             if i >= n:
                 raise LexError("字符常量未闭合", sl, sc)
-            if src[i] == "\\" and i + 1 < n:
-                esc = src[i + 1]
-                ch = {"n": "\n", "t": "\t", "r": "\r", "0": "\0",
-                      "\\": "\\", "'": "'", '"': '"'}.get(esc, esc)
-                i += 2
-                col += 2
-            else:
-                ch = src[i]
-                i += 1
-                col += 1
-            if i >= n or src[i] != "'":
+            chars = []
+            while i < n and src[i] != "'":
+                if src[i] == "\\" and i + 1 < n:
+                    esc = src[i + 1]
+                    chars.append({"n": "\n", "t": "\t", "r": "\r",
+                                  "0": "\0", "\\": "\\", "'": "'",
+                                  '"': '"'}.get(esc, esc))
+                    i += 2
+                    col += 2
+                elif src[i] == "\n":
+                    # 换行前还没闭合 → 真的是错的
+                    raise LexError("字符常量未闭合", sl, sc)
+                else:
+                    chars.append(src[i])
+                    i += 1
+                    col += 1
+            if i >= n:
                 raise LexError("字符常量未闭合", sl, sc)
             i += 1
             col += 1
-            # 字符常量在 C 里是 int 类型，这里存成 NUM 但标记来源
-            toks.append(Token(Tok.NUM, str(ord(ch)), sl, sc))
+            ch = chars[0] if len(chars) == 1 else "".join(chars)
+            # 字符常量在 C 里是 int 类型，这里存成 NUM 但标记来源。
+            # 多字符常量 'ans' 是合法 C（值实现定义），gcc 按
+            # "逐字节左移拼装"处理：'ans' = ('a'<<16)|('n'<<8)|'s'。
+            # 早期直接 ord(ch)，多字符时崩在 ord 上（实测 stu_21）。
+            if len(ch) == 1:
+                val = ord(ch)
+            else:
+                val = 0
+                for cc in ch:
+                    val = (val << 8) | (ord(cc) & 0xFF)
+            toks.append(Token(Tok.NUM, str(val), sl, sc))
             continue
 
         # 字符串字面量（只支持简单形式，不含转义全集）

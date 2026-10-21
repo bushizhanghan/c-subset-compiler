@@ -558,6 +558,8 @@ class Analyzer:
         self._reported_w24 = set()
         # 已报过 E1 的（名字, 行），避免同一行多个引用各报一次
         self._reported_e1 = set()
+        # W29：malloc 分配字节数（变量名 -> 字节数）
+        self._alloc_bytes = {}
         # 文件包含的标准头文件名（由 analyze() 从预处理结果传入）。
         # W25 靠它判断"调了某函数但没 include 对应头文件"。
         self._includes = []
@@ -866,6 +868,13 @@ class Analyzer:
         if vd.init is not None:
             t = self.check_expr(vd.init)
             sym.initialized = True
+            # W29：int *ans = malloc(...); 也要记住分配字节数
+            _rhs = vd.init
+            while isinstance(_rhs, UnOp) and _rhs.op == "cast":
+                _rhs = _rhs.operand
+            _n = getattr(_rhs, "alloc_bytes", None) if _rhs is not None else None
+            if _n is not None:
+                self._alloc_bytes[vd.name] = _n
             # W14b：声明初始化时就可能溢出（int big = 2147483647+1）
             self._check_decl_overflow(vd)
             self.check_assign_compat(vd.vtype, t, vd.init, vd.name,
@@ -1471,6 +1480,8 @@ class Analyzer:
             self._check_scope_escape(e)
             # W22：复合赋值里又写了同一个变量
             self._check_compound_self_ref(e)
+            # W29：把 malloc 的返回值赋给变量时，记住分配了多大
+            self._link_alloc(e)
             # W14b：赋值时右侧含"常量变量"的溢出（err_38）
             self._check_assign_overflow(e)
             # 复合赋值（+= -= ...）的"目标类型"不是左值类型：
@@ -2770,6 +2781,8 @@ class Analyzer:
             self.check_oob(e, "write")
             # W16：循环内写入 arr[i] 的区间越界
             self._check_index_range(e)
+            # W29：malloc 分配不足却用变量下标写
+            self._check_alloc_index(e)
             # 标记数组"有元素被写过"，供 W21 判断
             if isinstance(e.base, Ident):
                 sym = self.scope.lookup(e.base.name)
@@ -2987,6 +3000,115 @@ class Analyzer:
                       f"实际传的是 {str(vt)} 值",
                       "传地址（&变量）或指针；若是想传字符串首字符，"
                       "去掉多余的 *")
+
+    def _record_alloc_size(self, fname, call):
+        """记录 malloc/calloc 的分配字节数，供 W29 检查下标越界。
+
+            int *ans = (int*)malloc(sizeof(int));   // 只分了 4 字节
+            for (i = 0; i < numsSize; i++) {
+                ans[i] = count;      // ans[1]、ans[2]... 全部越界
+            }
+
+        真实来源：老师在 stu_22 里标为★致命。gcc 不报这类
+        （它只查类型不查大小）。
+
+        做法：把字节数挂在 call 节点上，赋值时关联到变量名。
+        只处理"参数能折成常量"的情形 —— 运行时算出来的大小不猜。
+        """
+        if fname == "malloc":
+            if len(call.args) != 1:
+                return
+            n = self._const_or_sizeof(call.args[0])
+        elif fname == "calloc":
+            if len(call.args) != 2:
+                return
+            a = self._const_or_sizeof(call.args[0])
+            b = self._const_or_sizeof(call.args[1])
+            n = (a * b) if (a is not None and b is not None) else None
+        else:
+            return
+        if n is None or n <= 0:
+            return
+        try:
+            call.alloc_bytes = n
+        except Exception:
+            pass
+
+    def _link_alloc(self, e):
+        """W29：把 malloc 分配字节数关联到接收它的变量。
+
+            赋值形态 1：int *ans = malloc(...);
+            赋值形态 2：ans = malloc(...);
+            两种情况都记下来，下标越界检查时用。
+        """
+        rhs = e.value
+        # 剥掉 (int*) 这类转换
+        while isinstance(rhs, UnOp) and rhs.op == "cast":
+            rhs = rhs.operand
+        n = getattr(rhs, "alloc_bytes", None) if rhs is not None else None
+        if n is None:
+            return
+        if isinstance(e.target, Ident):
+            self._alloc_bytes[e.target.name] = n
+
+    def _check_alloc_index(self, e):
+        """W29：用 malloc 分到的指针做下标，检查是否可能越界。
+
+            int *ans = malloc(sizeof(int));    // 4 字节
+            ans[i] = ...;                       // i 来自循环，会走到 1、2...
+
+        判据（很窄，只报确凿的）：
+          - 该变量确实是 malloc 来的，且字节数是常量
+          - 下标是变量（不是常量，常量走已有的 check_oob）
+          - 字节数除以元素大小 < 常见循环上界（保守取 1）
+        只要分配的元素个数 >= 1，且下标可能是变量，就提示 ——
+        因为"只分配 1 个元素却用变量下标"几乎总是错的。
+        """
+        base = e.base
+        if not isinstance(base, Ident):
+            return
+        nbytes = self._alloc_bytes.get(base.name)
+        if nbytes is None:
+            return
+        # 下标是常量就不在这里报（check_oob 会处理）
+        if const_int(e.idx) is not None:
+            return
+        esz = 4
+        sym = self.scope.lookup(base.name)
+        if sym is not None and sym.vtype is not None:
+            b = (sym.vtype.base or "int").replace("struct ", "")
+            esz = {"char": 1, "short": 2, "int": 4, "long": 8,
+                   "float": 4, "double": 8}.get(b, 4)
+        n_elems = nbytes // esz if esz else nbytes
+        if n_elems <= 1:
+            self.warn("W29", e.line, e.col,
+                      f"{base.name} 用 malloc 只分配了 {nbytes} 字节"
+                      f"（约 {n_elems} 个元素），"
+                      f"但这里用变量下标访问，很可能越界",
+                      f"改成 malloc(sizeof(...) * 实际元素个数)，"
+                      f"例如 malloc(sizeof(int) * n)")
+
+    def _const_or_sizeof(self, node):
+        """把表达式折成常量，认识 sizeof。
+
+        const_int 不认识 sizeof，但语义层算过尺寸（挂在 size_value 上）。
+        `malloc(sizeof(int))` 这种写法极常见，不认就查不出
+        "只分配 1 个元素" 这种致命错误（实测 stu_22）。
+        """
+        if node is None:
+            return None
+        if isinstance(node, UnOp) and node.op == "sizeof":
+            v = getattr(node, "size_value", None)
+            if isinstance(v, int) and v > 0:
+                return v
+            return None
+        if isinstance(node, BinOp) and node.op in ("*", "+"):
+            a = self._const_or_sizeof(node.left)
+            b = self._const_or_sizeof(node.right)
+            if a is None or b is None:
+                return None
+            return a * b if node.op == "*" else a + b
+        return const_int(node)
 
     def _check_format_args(self, fname, call):
         """W23：printf/scanf 的格式串与实参类型不匹配。
@@ -3250,12 +3372,12 @@ class Analyzer:
                     self.check_expr(a)
             # W23：格式串与参数类型不匹配
             self._check_format_args(name, call)
-            # W23：格式串与参数类型不匹配
-            self._check_format_args(name, call)
             # W25：调标准库函数但没包含对应头文件
             self._check_missing_include(name, call)
             # W26：指针参数收到非指针值
             self._check_ptr_args(name, call)
+            # W29：malloc 分配字节数明显不够
+            self._record_alloc_size(name, call)
             # 返回类型查表；没登记的一律"未知"。
             # 早期这里默认 int，于是 fopen/strdup/strstr 的返回值被当成
             # 整数，赋给 FILE*/char* 变量就变成假警告（实测 nmakehlp 6 条）。
