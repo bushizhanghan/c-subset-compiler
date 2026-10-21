@@ -411,7 +411,7 @@ STD_FUNCS_RET = {
     "printf": ("int", 0), "puts": ("int", 0), "putchar": ("int", 0),
     "getchar": ("int", 0), "scanf": ("int", 0), "sscanf": ("int", 0),
     "sprintf": ("int", 0), "snprintf": ("int", 0), "fputs": ("int", 0),
-    "strlen": ("int", 0), "strcmp": ("int", 0), "strncmp": ("int", 0),
+    "strlen": ("size_t", 0), "strcmp": ("int", 0), "strncmp": ("int", 0),
     "strspn": ("int", 0), "strcspn": ("int", 0), "memcmp": ("int", 0),
     "atoi": ("int", 0), "atol": ("int", 0), "abs": ("int", 0),
     "labs": ("int", 0), "rand": ("int", 0), "srand": ("void", 0),
@@ -2216,7 +2216,11 @@ class Analyzer:
             if ret is None:
                 return None
             base, ptr = ret
-            return VT(base, ptr=ptr)
+            # size_t 是无符号类型。丢掉这个信息，`i < strlen(s)`
+            # 的有符号/无符号混合比较就查不出来（实测 stu_05，
+            # gcc 的 -Wsign-compare 报了，csub 漏了）。
+            uns = (base == "size_t")
+            return VT(base, ptr=ptr, unsigned=uns)
 
         if fn is None:
             # 来自被忽略头文件的函数（Windows API、CPython C-API、
