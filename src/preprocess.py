@@ -1,4 +1,4 @@
-﻿"""预处理层：让真实作业代码能被分析。
+"""预处理层：让真实作业代码能被分析。
 
 为什么必须有这一层：
 任何真实 C 作业第一行都是 #include <stdio.h>，
@@ -273,7 +273,15 @@ def preprocess(src: str) -> PreResult:
         def sub_obj(text):
             if pattern is None:
                 return text
-            return pattern.sub(lambda mm: obj[mm.group(1)].body or "0", text)
+            # 空定义宏（#define X 后面什么都没有）要替换成空，
+            # 不是 "0"。这是真实代码里极常见的写法：
+            #   #else
+            #   #define F2PY_REPORT_ON_ARRAY_COPY_FROMARR
+            #   #endif
+            # 展开成 0 的话 `F2PY_REPORT_...;` 变成 `0;` ——
+            # 一条"算了常量没有效果"的语句，会触发 W24 假警告
+            # （实测 real_fortranobject.c 3 条）。
+            return pattern.sub(lambda mm: obj[mm.group(1)].body or "", text)
 
         def repl_line(line):
             line = apply_fn_macros(line)

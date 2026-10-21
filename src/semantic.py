@@ -447,6 +447,27 @@ class Diag:
         return s
 
 
+def _looks_like_macro_name(name):
+    """判断标识符像不像宏名：至少有一段 3 个以上连续大写字母。
+
+    用来豁免 Py_RETURN_NONE / F2PY_REPORT_ON_ARRAY_COPY_FROMARR
+    这类来自被忽略头文件的无参宏。
+    不能用 str.isupper()：'Py_RETURN_NONE'.isupper() 是 False
+    （里面有下划线和小写 y），会漏掉全部真实宏名。
+    """
+    run = 0
+    for ch in name:
+        if ch.isupper() or ch.isdigit():
+            run += 1
+            if run >= 3:
+                return True
+        elif ch == "_":
+            continue                     # 下划线不打断连续大写段
+        else:
+            run = 0
+    return False
+
+
 @dataclass
 class Symbol:
     name: str
@@ -512,6 +533,8 @@ class Analyzer:
         # 已报过 E2 的变量（函数名, 声明行, 声明列）：
         # 同一变量只报一次，避免循环里刷屏
         self._reported_e2 = set()
+        # 已报过 W24 的位置，避免同一语句被多次检查重复报
+        self._reported_w24 = set()
         # 当前作用域深度，用于块作用域逃逸检测（W20）
         self._scope_depth = 0
         # 已知是常量的局部变量（W14b 用）。
@@ -1005,12 +1028,17 @@ class Analyzer:
             self.push()
             if s.init is not None:
                 self.check_stmt(s.init)
+                # W24：for 的初始化写成裸表达式（stu_13 的 `for(q; ...)`）
+                if isinstance(s.init, ExprStmt):
+                    self._check_no_effect(s.init.expr)
             if s.cond is not None:
                 self.check_condition(s.cond, "for")
                 # W15：for 的 step 也不推进 → 死循环（i-- 方向反了）
                 self.check_loop_advance(s, "for")
             if s.step is not None:
                 self.check_expr(s.step)
+                # W24：for 的 step 也要有副作用，否则是死循环
+                self._check_no_effect(s.step)
             # W16：记录循环变量的取值区间，供循环体内的下标检查
             rng = self._for_range(s)
             if rng:
@@ -1032,6 +1060,76 @@ class Analyzer:
                          "检查是否写在了循环外")
         elif isinstance(s, ExprStmt):
             self.check_expr(s.expr)
+            # W24：无效果的表达式语句
+            self._check_no_effect(s.expr)
+
+    def _has_side_effect(self, e, depth=0):
+        """表达式是否有副作用（赋值、自增、函数调用、取地址）。"""
+        if e is None or depth > 30:
+            return True                  # 太深就当作有，避免误报
+        if isinstance(e, (Assign, Call)):
+            return True
+        if isinstance(e, UnOp):
+            if e.op in ("++", "--", "post++", "post--", "&"):
+                return True
+            return self._has_side_effect(e.operand, depth + 1)
+        if isinstance(e, BinOp):
+            return (self._has_side_effect(e.left, depth + 1)
+                    or self._has_side_effect(e.right, depth + 1))
+        if isinstance(e, Ternary):
+            return (self._has_side_effect(e.cond, depth + 1)
+                    or self._has_side_effect(e.then, depth + 1)
+                    or self._has_side_effect(e.els, depth + 1))
+        if isinstance(e, Index):
+            # a[i] 作为语句没意义，但 i 里可能有副作用
+            return self._has_side_effect(e.idx, depth + 1)
+        return False
+
+    def _check_no_effect(self, e):
+        """W24：无效果的表达式语句。
+
+            a + b;          // 算出来就扔了
+            42;             // 常量语句
+            q;              // 裸变量名（stu_13 的 for 初始化里就是这种）
+
+        真实来源：老师在 stu_13 的 `for(q; q<=n/2; q++)` 里指出
+        "初始化写成单独的 q 是无效果的表达式"。gcc 用
+        -Wunused-value 报，默认不开。
+
+        保守规则：
+          - 只查"完全没有副作用"的表达式
+          - 赋值、自增、函数调用、取地址、解引用都不报
+          - 指针解引用 *p 不报（可能在写 volatile / 硬件寄存器）
+        """
+        if e is None:
+            return
+        if self._has_side_effect(e):
+            return
+        # 解引用比较特殊：*p; 可能是访问硬件寄存器，不报
+        if isinstance(e, UnOp) and e.op == "*":
+            return
+        # 同一个位置只报一次：for 的 init 会被 check_stmt 和
+        # 这里的显式调用各查一遍，不去重就是重复诊断。
+        key = (e.line, e.col)
+        if key in self._reported_w24:
+            return
+        # 只报"算了个值就扔"的形态：字面量、裸变量、纯算术/比较
+        if isinstance(e, (Num, Str, Ident, BinOp, Ternary, Index, Member)):
+            # 大小写混合的宏名（Py_RETURN_NONE、F2PY_REPORT_...）
+            # 当作来自被忽略头文件的宏，不报。
+            # 依据：real_fortranobject.c 里这类无参宏被当成裸变量名，
+            # 一报就是 4 条假警告（实测）。
+            # 判据不能用 isupper()：Py_RETURN_NONE 里有小写 y 和
+            # 下划线，isupper() 返回 False。改成"全是连续大写段"。
+            if isinstance(e, Ident) and _looks_like_macro_name(e.name):
+                return
+            desc = "常量" if isinstance(e, (Num, Str)) else "表达式"
+            self.warn("W24", e.line, e.col,
+                      f"这条语句算了{desc}但结果没有被使用，"
+                      f"没有任何效果",
+                      "如果本意是赋值，检查是否漏了 = ；"
+                      "如果本意是判断，检查是否漏了 if")
+            self._reported_w24.add(key)
 
     def check_condition(self, cond, ctx):
         """条件表达式检查：重点抓 if (a = 1) 这类误写（W5）。"""

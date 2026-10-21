@@ -72,3 +72,9 @@ _tp*.py
 _ds*.py
 _tl*.py
 _addc*.py
+
+_cm6.py
+_vw*.py
+_fchk*.py
+_dbg*.py
+_final*.py

@@ -216,7 +216,15 @@ def run_one(src):
     警告不算误报（W 系列本来就是"提示你注意"）。
     all    错误 + 警告全算 —— 用于期望码里含警告的用例
     （如 W17：没有 main 报提示而不是 error）。
+
+    先过 preprocess：用例里可能有 #define，不过预处理会在
+    tokenize 阶段报"非法字符 '#'"（实测 ok_empty_macro）。
     """
+    try:
+        from preprocess import preprocess
+        src = preprocess(src).text
+    except Exception:
+        pass                          # 预处理失败就按原样继续
     try:
         tokenize(src)
     except LexError:

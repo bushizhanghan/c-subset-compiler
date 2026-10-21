@@ -832,3 +832,78 @@ int main() {
 }
 """, set()),
 ]
+
+
+# ---- W24 无效果的表达式语句 ----
+# 来源：老师在 stu_13 里指出 `for(q; q<=n/2; q++)` 的初始化
+# "写成单独的 q 是无效果的表达式"。gcc 用 -Wunused-value 报，
+# 默认不开，所以两个编译器都放行。
+EXTRA_CASES += [
+    # 应报
+    ("warn_no_effect_for_init", """
+int main() {
+    int n = 10;
+    int q = 1;
+    int k = 1;
+    for (q; q <= n / 2; q++) { k++; }
+    return k;
+}
+""", {"W24"}),
+
+    ("warn_no_effect_ident", """
+int main() {
+    int a = 1, b = 2;
+    a;
+    return b;
+}
+""", {"W24"}),
+
+    ("warn_no_effect_const", """
+int main() { 42; return 0; }
+""", {"W24"}),
+
+    ("warn_no_effect_arith", """
+int main() {
+    int a = 1, b = 2;
+    a + b;
+    return 0;
+}
+""", {"W24"}),
+
+    # 反向（不该报）
+    ("ok_effect_assign", """
+int main() { int a = 1; a = 2; return a; }
+""", set()),
+
+    ("ok_effect_call", """
+int main() { printf("hi"); return 0; }
+""", set()),
+
+    ("ok_effect_incr", """
+int main() { int a = 1; a++; return a; }
+""", set()),
+
+    ("ok_effect_deref", """
+int main() {
+    int a = 1;
+    int *p = &a;
+    *p;
+    return 0;
+}
+""", set()),
+
+    ("ok_effect_normal_for", """
+int main() {
+    int i;
+    int s = 0;
+    for (i = 0; i < 5; i = i + 1) { s = s + i; }
+    return s;
+}
+""", set()),
+
+    # 空定义宏展开成空语句，不该报
+    ("ok_empty_macro", """
+#define EMPTY_MACRO
+int main() { EMPTY_MACRO; return 0; }
+""", set()),
+]
