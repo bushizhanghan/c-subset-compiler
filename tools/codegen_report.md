@@ -32,8 +32,12 @@
 | p22_stack_arg_expr | 12 | 12 | 一致 |  |
 | p23_eight_args | 4 | 4 | 一致 |  |
 | p24_two_calls_5arg | 165 | 165 | 一致 |  |
+| p25_global_rw | 42 | 42 | 一致 |  |
+| p26_global_bss | 7 | 7 | 一致 |  |
+| p27_global_shared | 3 | 3 | 一致 |  |
+| p28_global_in_cond | 45 | 45 | 一致 |  |
 
-合计：24/24 一致。
+合计：28/28 一致。
 
 ## 后端实现要点
 

@@ -492,6 +492,9 @@ class Analyzer:
         # semantic.py 的 check_expr 自递归上）。
         self._expr_depth = 0
         self.MAX_EXPR_DEPTH = 150
+        # 当前生效的循环变量区间栈：(变量名, 最小下标, 最大下标)
+        # 供循环体内的 arr[i] 越界检查（W16）使用
+        self._loop_ranges = []
 
     # ---- 工具 ----
     def err(self, code, line, col, msg, hint=""):
@@ -919,9 +922,15 @@ class Analyzer:
                 self.check_loop_advance(s, "for")
             if s.step is not None:
                 self.check_expr(s.step)
+            # W16：记录循环变量的取值区间，供循环体内的下标检查
+            rng = self._for_range(s)
+            if rng:
+                self._loop_ranges.append(rng)
             self.loop_depth += 1
             self.check_stmt(s.body)
             self.loop_depth -= 1
+            if rng:
+                self._loop_ranges.pop()
             self.pop()
         elif isinstance(s, Return):
             if s.value is not None:
@@ -1185,6 +1194,8 @@ class Analyzer:
             bt = self.check_expr(e.base)
             self.check_expr(e.idx)
             self.check_oob(e, "read")
+            # W16：循环内的 arr[i] 区间越界（off-by-one）
+            self._check_index_range(e)
             return self.index_type(bt)
 
         if isinstance(e, InitList):
@@ -1896,6 +1907,81 @@ class Analyzer:
             else:
                 self._collect_loop_effects(child, modified, has_exit, _depth + 1)
 
+    def _for_range(self, s):
+        """推导 for 循环变量的下标区间 (变量名, min, max)。
+
+        只处理标准形态：for (i = K; i <op> N; i = i ± K)
+        - op 是 <  → max = N - 1
+        - op 是 <= → max = N
+        - op 是 >  → min = N + 1
+        - op 是 >= → min = N
+
+        推不出来（条件含变量、step 非 ±K 等）就返回 None，
+        调用方据此不做越界判断——宁可漏报也不误报。
+        """
+        if s.init is None or s.cond is None or s.step is None:
+            return None
+        # 取 init 的变量名与初值
+        var = None
+        if isinstance(s.init, VarDecl) and s.init.init is not None:
+            var, init_v = s.init.name, const_int(s.init.init)
+        elif isinstance(s.init, ExprStmt) and isinstance(s.init.expr, Assign) \
+                and isinstance(s.init.expr.target, Ident):
+            var, init_v = s.init.expr.target.name, const_int(s.init.expr.value)
+        else:
+            return None
+        if var is None or init_v is None:
+            return None
+        # 条件：i <op> N
+        c = s.cond
+        if not (isinstance(c, BinOp) and c.op in ("<", "<=", ">", ">=")):
+            return None
+        if not (isinstance(c.left, Ident) and c.left.name == var):
+            return None
+        bound = const_int(c.right)
+        if bound is None:
+            return None
+        # step 方向
+        step_var, step_dir = self._parse_step(s.step)
+        if step_var != var or step_dir == 0:
+            return None
+        # 推导上下界
+        if step_dir > 0:
+            hi = bound - 1 if c.op == "<" else bound
+            return (var, init_v, hi)
+        else:
+            lo = bound + 1 if c.op == ">" else bound
+            return (var, lo, init_v)
+
+    def _check_index_range(self, e):
+        """W16：循环内的 arr[i] 下标可能超出数组长度。
+
+        依赖 self._loop_ranges（由 For 处理时压栈）。
+        只在区间"确定"超出时才报；区间推不出来就静默跳过。
+        """
+        if not self._loop_ranges or not isinstance(e.idx, Ident):
+            return
+        var = e.idx.name
+        rng = None
+        for cand in reversed(self._loop_ranges):
+            if cand[0] == var:
+                rng = cand
+                break
+        if rng is None:
+            return
+        _v, lo, hi = rng
+        n = self.array_len_of(e.base)
+        if n is None:
+            return
+        if hi >= n:
+            self.warn("W16", e.line, e.col,
+                      f"循环变量 {var} 最大可取 {hi}，但数组长度只有 {n}",
+                      f"合法下标 0..{n - 1}，检查循环条件是否是 <= 应为 <")
+        elif lo < 0:
+            self.warn("W16", e.line, e.col,
+                      f"循环变量 {var} 最小可取 {lo}，数组下标不能为负",
+                      "检查循环条件或初值")
+
     def check_lvalue(self, e):
         """左值检查：只验证"这个标识符存不存在"，不检查是否已初始化。
 
@@ -1930,6 +2016,8 @@ class Analyzer:
             self.check_expr(e.idx)
             # 写入数组元素同样要查越界：arr[-1] = 1 也是错的
             self.check_oob(e, "write")
+            # W16：循环内写入 arr[i] 的区间越界
+            self._check_index_range(e)
             return self.index_type(bt)
         if isinstance(e, UnOp) and e.op == "*":
             t = self.check_expr(e.operand)

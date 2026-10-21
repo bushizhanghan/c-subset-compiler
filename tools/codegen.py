@@ -312,6 +312,11 @@ class FuncGen:
 
     def alloc(self):
         names = self.scan_symbols()
+        # 全局变量不进栈：它们在 .data / .bss 段，走 RIP 相对寻址。
+        # 早期不排除它们，会安静地分配一块栈槽去"存"全局变量，
+        # 于是读写全打在栈上，全局变量永远是 0——典型的静默算错。
+        names = [n for n in names
+                 if n not in getattr(self, "global_names", ())]
         self.ptr_names = self.detect_pointers(names)
         off = 0
         for n in names:
@@ -341,6 +346,9 @@ class FuncGen:
         return off
 
     def slot(self, name):
+        if name in getattr(self, "global_names", ()):
+            raise CodegenError(
+                f"函数 {self.name}: 全局变量 {name} 走数据段，不分配栈槽")
         if name not in self.slots:
             raise CodegenError(
                 f"函数 {self.name}: 未知变量 '{name}'"
@@ -349,6 +357,11 @@ class FuncGen:
 
     # ---- 操作数 ----
     def mem(self, name):
+        # 全局变量走 .data 段，用 RIP 相对寻址。
+        # 这是 x86-64 非位置相关代码访问静态数据的标准方式。
+        if name in getattr(self, "global_names", ()):
+            label = re.sub(r'[^0-9A-Za-z_]', '_', name)
+            return f"DWORD PTR {label}[rip]"
         off = self.slot(name)
         if self.kinds[name] == "ptr":
             return f"QWORD PTR [rbp-{off}]"
@@ -380,15 +393,20 @@ class FuncGen:
         if not _is_name(s):
             raise CodegenError(f"函数 {self.name}: 无法识别的操作数 '{s}'")
         if s not in self.slots:
+            if s in getattr(self, "global_names", ()):
+                return          # 全局变量走 .data 段，mem() 会处理
             raise CodegenError(
                 f"函数 {self.name}: 变量 '{s}' 不在本函数栈帧里"
-                f"（可能是全局变量，全局变量不进 IR，后端不支持）")
+                f"（可能是全局变量/结构体成员/不支持的表达式）")
 
     def load_operand(self, reg, s):
         """把操作数载入寄存器。指针走 64 位，整数走 32 位。"""
         self.check_operand(s)
         if _is_int_literal(s):
             self.line(f"mov {reg}, {s}")
+            return
+        if s in getattr(self, "global_names", ()):
+            self.line(f"mov {reg}, {self.mem(s)}")
             return
         off = self.slot(s)
         if self.kinds[s] == "array":
@@ -400,6 +418,9 @@ class FuncGen:
             self.line(f"mov {reg}, DWORD PTR [rbp-{off}]")
 
     def store_reg(self, name, reg="eax"):
+        if name in getattr(self, "global_names", ()):
+            self.line(f"mov {self.mem(name)}, {reg}")
+            return
         off = self.slot(name)
         if self.kinds[name] == "array":
             raise CodegenError(f"函数 {self.name}: 不能给数组名 '{name}' 赋值")
@@ -409,7 +430,14 @@ class FuncGen:
             self.line(f"mov DWORD PTR [rbp-{off}], {reg}")
 
     def lea_base(self, reg, name):
-        """把名字的地址放进寄存器：数组/标量取栈地址，指针取槽里的值。"""
+        """把名字的地址放进寄存器：数组/标量取栈地址，指针取槽里的值。
+
+        全局变量取的是它在 .data 段的绝对地址（用 lea rip 相对）。
+        """
+        if name in getattr(self, "global_names", ()):
+            label = re.sub(r'[^0-9A-Za-z_]', '_', name)
+            self.line(f"lea {reg}, {label}[rip]")
+            return
         off = self.slot(name)
         if self.kinds[name] == "ptr":
             self.line(f"mov {reg}, QWORD PTR [rbp-{off}]")
@@ -696,8 +724,16 @@ def split_args(s):
 # ---------------- 程序级 ----------------
 
 def split_functions(code):
-    """把平铺的 IR 指令按 `func f:` / `end func f:` 切成每个函数一段。"""
+    """把平铺的 IR 指令按 `func f:` / `end func f:` 切成每个函数一段。
+
+    同时抽出 `global X:` 段：全局变量的初始化指令放不进任何函数，
+    但要交给汇编生成器（它们进 .data / .bss 段）。
+    返回 (funcs, global_inits)：
+      funcs         [(函数名, [指令...]), ...]
+      global_inits  [(变量名, 初始化指令或 None)]
+    """
     funcs, order, cur = {}, [], None
+    gname, ginstrs, globals_ = None, None, []
     for ins in code:
         if ins.op == "label" and ins.extra.startswith("end func"):
             cur = None
@@ -709,10 +745,23 @@ def split_functions(code):
             funcs[cur] = []
             order.append(cur)
             continue
+        if ins.op == "label" and ins.extra.startswith("global "):
+            # 进入新的一段全局声明
+            if gname is not None:
+                globals_.append((gname, ginstrs))
+            gname = ins.extra[len("global "):].strip()
+            ginstrs = []
+            continue
         if cur is None:
+            # 不属于任何函数：要么在 global 段里，要么真的是孤儿
+            if gname is not None:
+                ginstrs.append(ins)
+                continue
             raise CodegenError(f"函数体外的指令: {ins}")
         funcs[cur].append(ins)
-    return [(n, funcs[n]) for n in order]
+    if gname is not None:
+        globals_.append((gname, ginstrs))
+    return [(n, funcs[n]) for n in order], globals_
 
 
 def generate_asm(prog, optimize=False, verbose=False):
@@ -725,39 +774,85 @@ def generate_asm(prog, optimize=False, verbose=False):
             print(f"[codegen] 常量折叠 {folded} 处，死代码 {removed} 条",
                   file=sys.stderr)
     types, globals_ = collect_types(prog)
-    funcs = split_functions(code)
+    funcs, global_inits = split_functions(code)
 
-    # 全局变量被引用时，IR 里它会以普通操作数出现，但函数内没有任何地方
-    # 初始化它。这里提前扫一遍，把错误定位到"哪个函数用了哪个全局变量"。
-    used_globals = set()
-    for _n, instrs in funcs:
-        for ins in instrs:
-            for f in (ins.dst, ins.a1, ins.a2):
-                if f and f in globals_:
-                    used_globals.add(f)
-    if used_globals:
-        raise CodegenError(
-            "引用了全局变量 "
-            + ", ".join(sorted(used_globals))
-            + " —— 全局变量不进 IR，后端不支持"
-            + "（否则会读到未初始化的栈内存，静默算错）")
+    # 全局变量：早期直接拒绝（"全局变量不进 IR，后端不支持"）。
+    # 但 IR 侧早已把它们放进来了（global X: + 初始化指令），
+    # 后端再拒绝就是自相矛盾。现在真的支持：进 .data / .bss 段。
+    global_names = set(n for n, _ in global_inits)
 
     out = [
         "# generated by csub tools/codegen.py (IR -> x86-64, Windows x64 ABI)",
         "# NOTE: comments use '#', never ';' -- in GAS x86, ';' is a statement",
         "# separator, so a ';' comment gives 'junk at end of line' (measured).",
         "\t.intel_syntax noprefix",
-        "\t.text",
     ]
+    # 段顺序很关键：写完 .data 必须切回 .text，否则后面的函数体会
+    # 继续落在 .data 段里，链接器照常通过，一运行就 0xC0000005（实测）。
+    # gcc 自己的顺序是 .text / .data / .text / 函数体。
+    data_lines = gen_global_data(global_inits, types)
+    out.append("\t.text")
+    if data_lines:
+        out.extend(data_lines)
+        out.append("\t.text")
     for name, instrs in funcs:
         out.append("")
         out.append(f"\t.globl {re.sub(r'[^0-9A-Za-z_]', '_', name)}")
         fg = FuncGen(name, instrs, types, globals_)
         fg._params = [p for p in _params_of(prog, name)]
+        fg.global_names = global_names
         fg.alloc()
         out.extend(fg.gen())
     out.append("")
     return "\n".join(out) + "\n", funcs
+
+
+def gen_global_data(global_inits, types):
+    """为全局变量生成 .data / .bss 段。
+
+    global_inits: [(变量名, 初始化指令列表)]，来自 IR 的 global X: 段。
+    有初值的进 .data，没有的进 .bss（.comm）。
+
+    简化处理：只看标量。数组全局（int a[10];）只能进 .bss 全零，
+    带初值的数组全局先不支持（CodegenError），绝不静默算错。
+    """
+    data, bss = [], []
+    for name, instrs in global_inits:
+        label = re.sub(r'[^0-9A-Za-z_]', '_', name)
+        ty = types.get(name)
+        if _is_array(ty):
+            raise CodegenError(
+                f"全局数组 {name} 带布局的后端尚未支持"
+                f"（无元素类型与偏移信息，静默算错比报错更糟）")
+        if not instrs:
+            bss.append((label, 4))
+            continue
+        # IR 形如 `g = 5`，取第一个赋值操作
+        val = None
+        for ins in instrs:
+            if ins.op == "=" and ins.dst == name:
+                val = ins.a1
+                break
+        if val is None or not _is_int_literal(val):
+            raise CodegenError(
+                f"全局变量 {name} 的初值不是整数常量，后端不支持")
+        data.append((label, val))
+    out = []
+    if data:
+        out.append("\t.data")
+        for label, val in data:
+            out.append(f"\t.globl {label}")
+            out.append(f"\t.align 4")
+            out.append(f"{label}:")
+            out.append(f"\t.long {val}")
+    if bss:
+        out.append("\t.bss")
+        for label, nbytes in bss:
+            out.append(f"\t.globl {label}")
+            out.append(f"\t.align 4")
+            out.append(f"{label}:")
+            out.append(f"\t.zero {nbytes}")
+    return out
 
 
 def _params_of(prog, fname):
@@ -962,6 +1057,21 @@ int main() {
     int x = add5(1, 2, 3, 4, 5);
     int y = add5(10, 20, 30, 40, 50);
     return x + y;
+}"""),
+    # ---- 全局变量（p25..p28）----
+    # 段顺序写错会让函数体落进 .data，链接照过、一跑就 0xC0000005。
+    ("p25_global_rw", """int g = 5;
+int main() { g = 42; return g; }"""),
+    ("p26_global_bss", """int g;
+int main() { g = 7; return g; }"""),
+    ("p27_global_shared", """int counter = 0;
+void inc() { counter = counter + 1; }
+int main() { inc(); inc(); inc(); return counter; }"""),
+    ("p28_global_in_cond", """int limit = 10;
+int main() {
+    int i = 0; int s = 0;
+    for (i = 0; i < limit; i = i + 1) { s = s + i; }
+    return s;
 }"""),
 ]
 
