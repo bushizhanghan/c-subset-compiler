@@ -1083,6 +1083,8 @@ class Analyzer:
             if s.value is not None:
                 self.check_expr(s.value)
                 self.check_return_local_addr(s)
+                # W27：返回类型与函数声明不匹配
+                self._check_return_type(s)
         elif isinstance(s, (Break, Continue)):
             if self.loop_depth == 0:
                 self.err("E11", s.line, s.col,
@@ -1910,6 +1912,51 @@ class Analyzer:
         for mty, _name in sd.members:
             total += self._sizeof_type(mty)
         return total or 4
+
+    def _check_return_type(self, ret):
+        """W27：return 的表达式类型与函数声明返回类型不匹配。
+
+            char* toHex(int num) {
+                char bin[64];
+                return *bin;      // *bin 是 char，函数要 char*
+            }
+
+        真实来源：老师在 stu_17 里把这条列为★致命三重错误之一。
+
+        保守规则：
+          - void 函数不查
+          - 未知类型（typedef 出来的）不查
+          - 只有在"指针性"不一致时才报，不查 int/char 之间的宽窄
+        """
+        if self.cur_func is None or self.cur_func.ret_type is None:
+            return
+        decl = self.cur_func.ret_type
+        base = (decl.base or "int").replace("struct ", "")
+        if base == "void":
+            return
+        consts = ("int", "char", "long", "short", "float", "double")
+        if base not in consts and not base.startswith("struct"):
+            return
+        want_ptr = getattr(decl, "ptr", 0) > 0
+        vt = self._vt_silent(ret.value)
+        if vt is None:
+            return
+        got_base = str(vt).replace("struct ", "")
+        if got_base not in consts and not got_base.startswith("struct"):
+            return
+        got_ptr = (vt.ptr > 0 or vt.array is not None or bool(vt.dims))
+        if want_ptr == got_ptr:
+            return
+        if want_ptr:
+            self.warn("W27", ret.line, ret.col,
+                      f"函数声明返回指针，"
+                      f"但这里 return 的是 {got_base} 值（{vt.text()}）",
+                      "要返回地址请 return 数组名 / 指针 / &变量")
+        else:
+            self.warn("W27", ret.line, ret.col,
+                      f"函数声明返回 {base} 值，"
+                      f"但这里 return 的是地址/数组",
+                      "检查是否多写了 & 或用了数组名")
 
     def check_return_local_addr(self, ret) -> None:
         """检查是否返回了局部变量的地址（D.1 号禁区）。

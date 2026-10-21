@@ -1052,3 +1052,49 @@ int main() {
 }
 """, set()),
 ]
+
+
+# ---- W27 return 类型与函数声明不匹配 ----
+# 来源：老师在 stu_17（十六进制转换）里标为★致命的三重错误之一：
+#     char* toHex(int num) { ... return *bin; }
+# *bin 是 char（首字符），函数要 char*。
+# gcc 对这条在部分配置下报 error，默认不开。
+EXTRA_CASES += [
+    # 应报
+    ("warn_return_ptr_mismatch", """
+char* f() {
+    char bin[64];
+    return *bin;
+}
+""", {"W27"}),
+
+    ("warn_return_value_from_ptr_func", """
+int f(char *p) {
+    return p;
+}
+""", {"W27"}),
+
+    # 反向（不该报）
+    ("ok_return_ptr", """
+char* f(char *p) { return p; }
+""", set()),
+
+    ("ok_return_int", """
+int f() { return 1; }
+""", set()),
+
+    ("ok_return_void", """
+void f() { return; }
+""", set()),
+
+    ("ok_return_array_from_ptr_func", """
+char* f() {
+    static char bin[64];
+    return bin;
+}
+""", set()),
+
+    ("ok_return_addr_from_ptr_func", """
+int* f(int *p) { return &p[0]; }
+""", set()),
+]
