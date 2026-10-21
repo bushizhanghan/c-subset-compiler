@@ -34,3 +34,8 @@ _probe_*.py
 # 一次性对照文件
 _new_diags.json
 *_diags*.json
+
+# 临时验证文件
+_g*.c
+_ov*.c
+_t*.c

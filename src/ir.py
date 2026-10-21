@@ -105,6 +105,18 @@ class IRGen:
 
     # ---- 顶层 ----
     def gen_program(self, prog: Program):
+        # 全局变量必须先进 IR：否则后端看不到初始化处，
+        # 函数里引用全局变量时会去读一块未初始化的栈内存。
+        # 早期版本只遍历函数，全局声明整个丢掉，
+        # 表现为 `int g = 5; return g;` 的 IR 里根本没有 g 的定义。
+        for d in prog.decls:
+            if isinstance(d, VarDecl):
+                self.emit("label", extra=f"global {d.name}")
+                self.gen_vardecl(d)
+            elif isinstance(d, DeclGroup):
+                for vd in d.decls:
+                    self.emit("label", extra=f"global {vd.name}")
+                    self.gen_vardecl(vd)
         for d in prog.decls:
             if isinstance(d, FuncDef) and d.body is not None:
                 self.emit("label", extra=f"func {d.name}")
