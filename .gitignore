@@ -50,3 +50,11 @@ _local.txt
 _commit.py
 _push.py
 _gpush.py
+
+# 一次性脚本
+_cm*.py
+_add*.py
+_fix*.py
+_del*.py
+_db*.py
+_t*.py

@@ -245,6 +245,10 @@ class FuncGen:
         # 在 generate_asm 里统一输出到 .rdata 段。
         self._str_pool = {}
         self._str_data = []
+        # 浮点：已知是 float 的临时量/变量名，以及浮点常量池
+        self.float_tmps = set()
+        self._fconst_pool = {}
+        self._fconst_data = []
 
     # ---- 汇编输出 ----
     def line(self, text):
@@ -403,9 +407,9 @@ class FuncGen:
         if _is_int_literal(s):
             return
         if _looks_float(s):
-            raise CodegenError(
-                f"函数 {self.name}: 浮点常量 '{s}' —— 浮点（float/double）"
-                f"后端不支持，只做 32 位整数")
+            # 浮点常量已支持（xmm 寄存器 + .rdata 常量池）。
+            # 早期这里直接报错，整个浮点子系统被一句话排除。
+            return
         if s[0] in "\"'":
             raise CodegenError(
                 f"函数 {self.name}: 字符串字面量 {s} —— 字符串/库函数不支持")
@@ -432,8 +436,11 @@ class FuncGen:
             return
         off = self.slot(s)
         if self.kinds[s] == "array":
-            raise CodegenError(
-                f"函数 {self.name}: 把数组名 '{s}' 当值使用 —— 不支持")
+            # 数组名作为值使用时退化成首元素地址（C 标准规则）。
+            # `strlen(s)` / `strcpy(a, b)` / `f(s)` 都是这个形态。
+            # 早期直接报错，导致所有字符串函数都用不了。
+            self.line(f"lea {R64.get(reg, reg)}, [rbp-{off}]")
+            return
         if self.kinds[s] == "ptr":
             self.line(f"mov {R64.get(reg, reg)}, QWORD PTR [rbp-{off}]")
         else:
@@ -530,10 +537,24 @@ class FuncGen:
 
         if op == "return":
             if ins.a1:
-                self.load_operand("eax", ins.a1)
+                if self._operand_is_float(ins.a1):
+                    # float 函数返回值：main 的返回值是 int，
+                    # 要 cvttss2si 截断转整数（C 的 float->int 是截断不是四舍五入）
+                    self.load_float("xmm0", ins.a1)
+                    self.line("cvttss2si eax, xmm0")
+                else:
+                    self.load_operand("eax", ins.a1)
             else:
                 self.line("xor eax, eax")
             self.line(f"jmp .Lret_{self.asm}")
+            return
+
+        # ---- 浮点路径（必须放在 "=" 之前）----
+        # 判据：任一操作数是 float 字面量或 float 变量，这条指令就是浮点。
+        # 早期把这个判断放在 "=" 之后，导致 `float x = 1.5` 先走了
+        # 整数路径，1.5 被当成变量名去查槽位，报"未知变量 '1.5'"。
+        if self._is_float_expr(ins):
+            self.gen_float_instr(ins)
             return
 
         if op == "=":
@@ -670,12 +691,148 @@ class FuncGen:
             if a.startswith("_str_"):
                 # 字符串字面量：取地址进寄存器（64 位）
                 self.line(f"lea {ARG_REGS64[i]}, {a}[rip]")
+            elif self._operand_is_ptr(a):
+                # 数组名退化的首地址 / 指针变量：都是 64 位值，
+                # 必须用 64 位寄存器。用 ecx 装地址会截断高位
+                # （实测堆/栈地址高位非零，一截就是野指针）。
+                self.load_operand(ARG_REGS64[i], a)
             else:
                 self.load_operand(ARG_REGS[i], a)
 
         self.line(f"call {target}")
         if ins.dst:
             self.store_reg(ins.dst)
+
+    def _operand_is_ptr(self, s):
+        """这个 IR 操作数是不是 64 位值（指针或数组名）。"""
+        if s in getattr(self, "ptr_names", ()):
+            return True
+        if self.kinds.get(s) == "array":
+            return True                 # 数组名退化成首地址
+        return False
+
+    # ---- 浮点 ----
+    def _operand_is_float(self, s):
+        """这个 IR 操作数是不是 float 值。"""
+        if s is None:
+            return False
+        if _looks_float(s):
+            return True                     # 字面量 1.5
+        ty = self.types.get(s)
+        if ty is not None and (ty.base or "") in ("float", "double"):
+            return True
+        return s in self.float_tmps
+
+    def _is_float_expr(self, ins):
+        """这条指令是不是浮点运算（按 C 的算术提升规则）。"""
+        if ins.dst and ins.dst in self.float_tmps:
+            return True
+        if self._operand_is_float(ins.a1) or self._operand_is_float(ins.a2):
+            return True
+        return False
+
+    def gen_float_instr(self, ins):
+        """生成浮点指令。用 xmm0/xmm1，scalar 单精度。
+
+        只支持 float（32 位）。double 需要 sd 后缀和不同寻址宽度，
+        本教学后端先不做，遇到明确报错。
+        """
+        op = ins.op
+        if op == "=":
+            self.load_float("xmm0", ins.a1)
+            self.store_float(ins.dst, "xmm0")
+            if ins.dst:
+                self.float_tmps.add(ins.dst)
+            return
+        if op in ("+", "-", "*", "/"):
+            self.load_float("xmm0", ins.a1)
+            fop = {"+": "addss", "-": "subss",
+                   "*": "mulss", "/": "divss"}[op]
+            if self._operand_is_float(ins.a2):
+                self.load_float("xmm1", ins.a2)
+                self.line(f"{fop} xmm0, xmm1")
+            elif _is_int_literal(ins.a2):
+                self.line(f"mov eax, {ins.a2}")
+                self.line("cvtsi2ss xmm1, eax")
+                self.line(f"{fop} xmm0, xmm1")
+            else:
+                raise CodegenError(
+                    f"函数 {self.name}: 浮点运算 '{op}' 的右操作数 "
+                    f"'{ins.a2}' 无法识别")
+            self.store_float(ins.dst, "xmm0")
+            if ins.dst:
+                self.float_tmps.add(ins.dst)
+            return
+        if op in ("<", ">", "<=", ">=", "==", "!="):
+            self.load_float("xmm0", ins.a1)
+            self.load_float("xmm1", ins.a2)
+            self.line("comiss xmm0, xmm1")
+            cc = SETCC.get(op)
+            if cc is None:
+                raise CodegenError(
+                    f"函数 {self.name}: 浮点比较 '{op}' 不支持")
+            self.line(f"set{cc} al")
+            self.line("movzx eax, al")
+            # 比较结果是 int（0/1），不是 float
+            self.store_reg(ins.dst)
+            if ins.dst:
+                self.float_tmps.discard(ins.dst)
+            return
+        if op == "neg":
+            self.load_float("xmm0", ins.a1)
+            self.line("mov eax, 0x80000000")
+            self.line("movd xmm1, eax")
+            self.line("xorps xmm0, xmm1")
+            self.store_float(ins.dst, "xmm0")
+            if ins.dst:
+                self.float_tmps.add(ins.dst)
+            return
+        raise CodegenError(
+            f"函数 {self.name}: 浮点指令 '{op}' 后端不支持")
+
+    def load_float(self, xmm, s):
+        """把 float 操作数装进 xmm 寄存器。
+
+        三种来源：字面量（.rdata 常量）、float 变量（槽位）、
+        整数（cvtsi2ss 提升）。
+        """
+        if s is None:
+            raise CodegenError(f"函数 {self.name}: 浮点操作数缺失")
+        if _looks_float(s):
+            label = self._intern_float_const(s)
+            self.line(f"movss {xmm}, DWORD PTR {label}[rip]")
+            return
+        if s in self.float_tmps or self._operand_is_float(s):
+            off = self.slot(s)
+            self.line(f"movss {xmm}, DWORD PTR [rbp-{off}]")
+            return
+        if _is_int_literal(s):
+            self.line(f"mov eax, {s}")
+            self.line(f"cvtsi2ss {xmm}, eax")
+            return
+        if s in self.slots:
+            off = self.slot(s)
+            self.line(f"cvtsi2ss {xmm}, DWORD PTR [rbp-{off}]")
+            return
+        raise CodegenError(
+            f"函数 {self.name}: 无法识别的浮点操作数 '{s}'")
+
+    def store_float(self, name, xmm):
+        """把 xmm 里的 float 存进变量槽。"""
+        if name in getattr(self, "global_names", ()):
+            label = re.sub(r'[^0-9A-Za-z_]', '_', name)
+            self.line(f"movss DWORD PTR {label}[rip], {xmm}")
+            return
+        off = self.slot(name)
+        self.line(f"movss DWORD PTR [rbp-{off}], {xmm}")
+
+    def _intern_float_const(self, text):
+        """把浮点字面量放 .rdata，返回标签（.float 单精度）。"""
+        if text not in self._fconst_pool:
+            label = f"_fc_{len(self._fconst_pool)}"
+            self._fconst_pool[text] = label
+            self._fconst_data.append((label, float(text)))
+        return self._fconst_pool[text]
 
     def _intern_string(self, arg):
         """把 IR 参数里的字符串字面量提取到 .rdata，返回标签名。
@@ -833,6 +990,9 @@ def generate_asm(prog, optimize=False, verbose=False):
     # 字符串字面量池（跨函数去重）
     str_pool = {}
     seen_str_labels = set()
+    # 浮点常量池（跨函数去重）
+    fc_pool = {}
+    seen_fc_labels = set()
 
     out = [
         "# generated by csub tools/codegen.py (IR -> x86-64, Windows x64 ABI)",
@@ -861,15 +1021,23 @@ def generate_asm(prog, optimize=False, verbose=False):
             if label not in seen_str_labels:
                 seen_str_labels.add(label)
                 str_pool[text] = label
+        # 浮点常量同样跨函数去重
+        for text, label in fg._fconst_pool.items():
+            if label not in seen_fc_labels:
+                seen_fc_labels.add(label)
+                fc_pool[text] = label
     # 字符串字面量放 .rdata，必须在 .text 之后、且所有函数都生成完
     # 之后统一输出（标签跨函数共享，重复定义会链接失败）。
-    if str_pool:
+    if str_pool or fc_pool:
         out.append("")
         out.append('\t.section .rdata,"dr"')
         for text, label in sorted(str_pool.items(), key=lambda x: x[1]):
             esc = _asm_escape(text)
             out.append(f"{label}:")
             out.append(f'\t.asciz "{esc}"')
+        for text, label in sorted(fc_pool.items(), key=lambda x: x[1]):
+            out.append(f"{label}:")
+            out.append(f"\t.float {text}")
     out.append("")
     return "\n".join(out) + "\n", funcs
 
@@ -1243,6 +1411,41 @@ int main() {
     int s = p[0] + p[1] + p[2];
     free(p);
     return s;
+}"""),
+    # ---- 浮点（p42..p47）----
+    # 用 xmm 寄存器 + .rdata 里的 .float 常量。
+    # 关键：浮点判断必须放在 "=" 分支之前。放之后的话
+    # `float x = 1.5` 会先走整数路径，1.5 被当成变量名查槽位，
+    # 报"未知变量 '1.5'"（实测踩到）。
+    ("p42_float_const", """int main() {
+    float x = 1.5f;
+    return (int)x;
+}"""),
+    ("p43_float_add", """int main() {
+    float x = 1.5f;
+    float y = x + 2.5f;
+    return (int)y;
+}"""),
+    ("p44_float_mul", """int main() {
+    float x = 2.5f;
+    float y = x * 4.0f;
+    return (int)y;
+}"""),
+    ("p45_float_div", """int main() {
+    float x = 7.0f;
+    float y = x / 2.0f;
+    return (int)y;
+}"""),
+    ("p46_float_compare", """int main() {
+    float x = 1.5f;
+    if (x > 1.0f) { return 10; }
+    return 20;
+}"""),
+    ("p47_float_in_loop", """int main() {
+    float s = 0.0f;
+    int i = 0;
+    for (i = 0; i < 4; i = i + 1) { s = s + 1.5f; }
+    return (int)s;
 }"""),
 ]
 

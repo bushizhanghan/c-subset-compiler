@@ -49,8 +49,14 @@
 | p39_malloc_printf | 0 | 0 | 一致 |  |
 | p40_malloc_recursion | 0 | 0 | 一致 |  |
 | p41_calloc | 18 | 18 | 一致 |  |
+| p42_float_const | 1 | 1 | 一致 |  |
+| p43_float_add | 4 | 4 | 一致 |  |
+| p44_float_mul | 10 | 10 | 一致 |  |
+| p45_float_div | 3 | 3 | 一致 |  |
+| p46_float_compare | 10 | 10 | 一致 |  |
+| p47_float_in_loop | 6 | 6 | 一致 |  |
 
-合计：41/41 一致。
+合计：47/47 一致。
 
 ## 后端实现要点
 
