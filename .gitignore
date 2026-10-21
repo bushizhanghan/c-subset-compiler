@@ -101,3 +101,7 @@ _cm11.py
 _trec*.py
 _diag.py
 _ck*.py
+
+_cm12.py
+_probe1*.py
+_fr1*.py

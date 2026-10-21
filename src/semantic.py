@@ -556,6 +556,8 @@ class Analyzer:
         self._reported_e2 = set()
         # 已报过 W24 的位置，避免同一语句被多次检查重复报
         self._reported_w24 = set()
+        # 已报过 E1 的（名字, 行），避免同一行多个引用各报一次
+        self._reported_e1 = set()
         # 文件包含的标准头文件名（由 analyze() 从预处理结果传入）。
         # W25 靠它判断"调了某函数但没 include 对应头文件"。
         self._includes = []
@@ -1273,9 +1275,16 @@ class Analyzer:
             if sym is None and _is_likely_external_macro(e.name):
                 return None
             if sym is None:
-                self.err("E1", e.line, e.col,
-                         f"使用了未声明的变量 {e.name!r}",
-                         "检查拼写，或先声明它")
+                # 同名变量在同一行只报一次。
+                # 实测 stu_18：`int max1=nums[0],max2=nums[0],max3=nums[0];`
+                # 在函数外（因为多了一个 }），nums 被三个初始化各报一次
+                # E1，刷出 3 条重复诊断。
+                key = ("E1", e.name, e.line)
+                if key not in self._reported_e1:
+                    self._reported_e1.add(key)
+                    self.err("E1", e.line, e.col,
+                             f"使用了未声明的变量 {e.name!r}",
+                             "检查拼写，或先声明它")
                 return None
             if sym.kind == "func":
                 return VT("func")
@@ -2713,9 +2722,12 @@ class Analyzer:
                         or _is_type_name(e.name)
                         or _is_likely_external_macro(e.name)):
                     return VT("int")
-                self.err("E1", e.line, e.col,
-                         f"使用了未声明的变量 {e.name!r}",
-                         "检查拼写，或先声明它")
+                key = ("E1", e.name, e.line)
+                if key not in self._reported_e1:
+                    self._reported_e1.add(key)
+                    self.err("E1", e.line, e.col,
+                             f"使用了未声明的变量 {e.name!r}",
+                             "检查拼写，或先声明它")
                 return None
             if sym.kind == "func":
                 return VT("func")
