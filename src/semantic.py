@@ -560,6 +560,12 @@ class Analyzer:
         self._reported_e1 = set()
         # W29：malloc 分配字节数（变量名 -> 字节数）
         self._alloc_bytes = {}
+        # 外部依赖检测：未声明函数的调用集合 + 模式开关
+        self._ext_dep_mode = False
+        # 阈值：未声明函数超过 5 个（去重）就判定依赖缺失头文件。
+        # 取 5 的理由：学生作业里偶尔调 1-2 个未知函数（拼错、忘声明）
+        # 是真错误该报；超过 5 个几乎一定是第三方库。
+        self._EXT_DEP_THRESHOLD = 5
         # 文件包含的标准头文件名（由 analyze() 从预处理结果传入）。
         # W25 靠它判断"调了某函数但没 include 对应头文件"。
         self._includes = []
@@ -602,6 +608,31 @@ class Analyzer:
         self._scope_depth -= 1
 
     # ---- 入口 ----
+    def _scan_calls(self, node, unknown, depth=0):
+        """递归收集"调用了但既不在本文件、也不在标准库表里"的函数名。
+
+        只统计名字，不做任何诊断 —— 这是第 1.5 遍预扫描。
+        """
+        if node is None or depth > 60:
+            return
+        if isinstance(node, Call) and isinstance(node.func, Ident):
+            n = node.func.name
+            if n not in self.funcs and n not in STD_FUNCS \
+                    and n not in unknown:
+                unknown.add(n)
+        # Program 的顶层是 decls，其余节点用通用属性遍历
+        for attr in ("decls", "body", "stmts", "then", "els", "init",
+                     "cond", "step", "value", "target", "left", "right",
+                     "operand", "base", "idx", "args", "expr"):
+            c = getattr(node, attr, None)
+            if c is None:
+                continue
+            if isinstance(c, list):
+                for x in c:
+                    self._scan_calls(x, unknown, depth + 1)
+            else:
+                self._scan_calls(c, unknown, depth + 1)
+
     def analyze(self, prog: Program) -> list:
         # 第零遍：登记 typedef 出来的类型名，否则 Node / LinkList 会被当变量
         for d in prog.decls:
@@ -625,6 +656,25 @@ class Analyzer:
                 self.globals.declare(Symbol(
                     name=d.name, vtype=d.ret_type, kind="func",
                     initialized=True, used=True, line=d.line, col=d.col))
+
+        # 第 1.5 遍：外部依赖检测。
+        # 数一遍全程序里"调用了但不在本文件定义、也不在标准库表里"
+        # 的函数有几个（去重）。超过阈值说明它依赖某个我们看不到
+        # 的头文件（EasyX / Windows API / CPython ...），此时 E5
+        # 要收敛成一条提示 —— 逐个报全是噪音
+        # （实测 stu_24 一次冒出 97 条 E5）。
+        unknown = set()
+        self._scan_calls(prog, unknown)
+        self._ext_dep_mode = len(unknown) >= self._EXT_DEP_THRESHOLD
+        if self._ext_dep_mode:
+            names = ", ".join(sorted(unknown)[:6])
+            self.diags.append(Diag(
+                "warning", "W30", 1, 1,
+                f"本文件调用了 {len(unknown)} 个本工具看不到声明的函数"
+                f"（如 {names}...），"
+                f"很可能依赖未安装的头文件，相关的参数/返回值检查已跳过",
+                "如果这些函数来自某个图形库或第三方框架，"
+                "请安装对应环境后重试；其余诊断仍然有效"))
 
         # 第二遍：检查每个声明
         for d in prog.decls:
@@ -3393,8 +3443,18 @@ class Analyzer:
 
         if fn is None:
             # 来自被忽略头文件的函数（Windows API、CPython C-API、
-            # numpy 等），看不到声明就容忍，不报 E5。
-            if _looks_like_external_fn(name):
+            # numpy、EasyX 等），看不到声明就容忍，不报 E5。
+            #
+            # 两层豁免：
+            #   1) 名字特征（大写开头 / 已知前缀）
+            #   2) 外部依赖检测：如果本文件里"未声明的函数"超过
+            #      _EXT_DEP_THRESHOLD 个（去重），说明它依赖某个
+            #      我们看不到的头文件（如 EasyX 的 graphics.h），
+            #      此时所有 E5 收敛成一条提示。
+            #      实测 stu_24（400 行贪吃蛇，依赖 graphics.h /
+            #      conio.h / mmsystem.h，本机都没有）：
+            #      不加这条会报 97 条 E5，全是噪音。
+            if _looks_like_external_fn(name) or self._ext_dep_mode:
                 for a in call.args:
                     # 看不到声明就不知道哪几个参数是输出。
                     # 保守做法：&x 一律视为"可能被写入"并标记已初始化，

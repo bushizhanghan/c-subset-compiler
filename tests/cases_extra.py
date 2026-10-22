@@ -1226,3 +1226,38 @@ int main() {
 }
 """, set()),
 ]
+
+
+# ---- W30 外部依赖检测（未知函数过多时收敛 E5）----
+# 来源：stu_24（400 行 EasyX 贪吃蛇）。graphics.h / conio.h
+# 本机没有，预处理忽略后 EasyX 函数全部变成"未声明"，
+# 一次冒出 97 条 E5 —— 全是噪音，学生会直接扔掉工具。
+#
+# 规则：未声明函数（去重）>= 5 个时，E5 收敛成一条 W30 提示。
+EXTRA_CASES += [
+    # 应报 W30（未知函数 >= 5 个）
+    ("warn_ext_deps_graphics", """
+int main() {
+    initgraph(640, 480);
+    setfillcolor(RGB(255, 0, 0));
+    setlinecolor(RGB(255, 0, 0));
+    fillcircle(100, 100, 50);
+    cleardevice();
+    return 0;
+}
+""", {"W30"}),
+
+    # 不该报：1-2 个未知函数是真错误（拼错/忘声明）
+    ("ok_few_unknown_funcs", """
+int main() {
+    int x = getuserinput();
+    return x;
+}
+""", {"E5"}),
+
+    # 不该报：已声明的函数
+    ("ok_declared_funcs", """
+int add(int a, int b) { return a + b; }
+int main() { return add(1, 2); }
+""", set()),
+]
