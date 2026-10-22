@@ -2953,7 +2953,15 @@ class Analyzer:
             return VT(str(t), ptr=t.ptr + 1, array=None, unsigned=t.unsigned)
         if isinstance(e, Member):
             # 写成员字段同样要走成员检查（拼错的字段名要报），
-            # 但不把整个结构体变量当成"被读取"。
+            # 但不把整个结构体变量当成"被读取"（s.field = x 不是读 s）。
+            # 但 base 是 Index 时例外：students[i].name 里的
+            # students 通过取下标被用到了，必须标 used，
+            # 否则 W6 报"students 声明后从未使用"（实测 stu_34，
+            # 而 gcc 零诊断）。
+            if isinstance(e.base, Index) and isinstance(e.base.base, Ident):
+                sym = self.scope.lookup(e.base.base.name)
+                if sym is not None:
+                    sym.used = True
             return self.check_member(e)
         return self.check_expr(e)
 
