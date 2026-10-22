@@ -27,6 +27,13 @@ KEYWORDS = {
     "sizeof", "struct", "const", "static",
     "typedef", "union", "enum", "signed", "unsigned",
     "short", "long", "switch", "case", "default", "do", "goto", "extern",
+    # C99/C11 限定符与类型。不登记成 KW 的话，
+    # `char *restrict dst` 里的 restrict 会被当成参数名，
+    # 后面跟着的 dst 无处安放 → 报"期望 ')'，实际是 'dst'"
+    # （实测 stu_38，gcc 零诊断）。
+    "restrict", "inline", "register", "volatile", "_Bool",
+    "_Atomic", "_Noreturn", "_Complex", "_Imaginary", "_Alignas",
+    "_Alignof", "_Static_assert", "_Thread_local", "_Generic",
 }
 
 # 按长度降序，保证最长匹配（>= 优先于 >）

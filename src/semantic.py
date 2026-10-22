@@ -1593,7 +1593,11 @@ class Analyzer:
                 # unused，W6 也不该报（实测 stu_37 的
                 # ARRAY_SIZE(arr) 被误报）。
                 self._mark_used_in(e.operand)
-                return VT("int")
+                # sizeof 的返回类型是 size_t（unsigned long）。
+                # 早期返回 int，printf("%lu", sizeof(x)) 会被
+                # W23 误报"类型不匹配"（实测 stu_38，gcc 只对
+                # long long 参数报，int 的也报但这里是 sizeof 应该匹配）。
+                return VT("long", ptr=0, unsigned=True)
             t = self.check_expr(e.operand)
             if e.op in ("!",):
                 return VT("int")
@@ -3040,7 +3044,7 @@ class Analyzer:
         "X": ({"int", "char"}, False),
         "o": ({"int", "char"}, False),
         "ld": ({"long"}, False),
-        "lu": ({"long"}, False),
+        "lu": ({"long", "unsigned long"}, False),
         "lld": ({"long", "long long"}, False),
         "llu": ({"long", "long long"}, False),
         "hd": ({"short", "int", "char"}, False),

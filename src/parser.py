@@ -387,10 +387,27 @@ class Parser:
         # 但 static 要记下来：W19（爆栈检查）靠它区分栈上与 .data/.bss。
         storage = ""
         while self.cur.kind == Tok.KW and self.cur.value in (
-                "static", "const", "extern", "inline", "register", "volatile"):
+                "static", "const", "extern", "inline", "register",
+                "volatile", "restrict", "_Atomic", "_Noreturn"):
             if self.cur.value == "static":
                 storage = "static"
             self.advance()
+        # GCC/Clang 属性：__attribute__((unused)) / __attribute__((packed))
+        # 可出现在类型前后、函数名前后。语法上是一串修饰，直接吃掉。
+        # 早期不认，报"期望 '{'，实际是 '__attribute__'"（实测 stu_38）。
+        while self.at_kind(Tok.IDENT) and self.cur.value == "__attribute__":
+            self.advance()
+            if self.at("("):
+                depth = 0
+                while not self.at_kind(Tok.EOF):
+                    if self.at("("):
+                        depth += 1
+                    elif self.at(")"):
+                        depth -= 1
+                        if depth == 0:
+                            self.advance()
+                            break
+                    self.advance()
         ty = self._parse_type_inner()
         if ty is not None and storage:
             ty.storage = storage
@@ -433,6 +450,21 @@ class Parser:
                                             "char", "double"):
             base = self.advance().value
             ty = Type(base=base)
+            while self.at("*"):
+                self.advance()
+                ty.ptr += 1
+                # 星号后的限定符：char *restrict dst / const char *restrict s
+                # C99 允许限定符出现在 * 之后，不影响指针层数。
+                while (self.cur.kind == Tok.KW
+                       and self.cur.value in ("const", "volatile",
+                                              "restrict", "_Atomic")):
+                    self.advance()
+            return ty
+        # C99/C11 的 _Bool（以及别名 bool）：语义上当 int 处理。
+        # 早期不认，报"期望类型声明，实际是 '_Bool'"（实测 stu_38）。
+        if t.kind == Tok.KW and t.value in ("_Bool", "bool"):
+            self.advance()
+            ty = Type(base="int")
             while self.at("*"):
                 self.advance()
                 ty.ptr += 1
@@ -1020,6 +1052,20 @@ class Parser:
                         continue
                     break
         self.expect(")")
+        # 函数名后的 __attribute__：static int f(void) __attribute__((unused));
+        while self.at_kind(Tok.IDENT) and self.cur.value == "__attribute__":
+            self.advance()
+            if self.at("("):
+                depth = 0
+                while not self.at_kind(Tok.EOF):
+                    if self.at("("):
+                        depth += 1
+                    elif self.at(")"):
+                        depth -= 1
+                        if depth == 0:
+                            self.advance()
+                            break
+                    self.advance()
         fn = FuncDef(line=name_tok.line, col=name_tok.col,
                      name=name, ret_type=ret_type, params=params)
         if self.at(";"):
