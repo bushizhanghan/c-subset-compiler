@@ -148,7 +148,13 @@ STD_FUNCS = {
     "remove": (1, 1, set()), "rename": (2, 2, set()),
     "fprintf": (2, 99, set()), "fscanf": (2, 99, "needs_addr_out"),
     "fgets": (3, 3, set()), "sprintf": (2, 99, set()),
-    "snprintf": (3, 99, set()), "atoi": (1, 1, set()),
+    "snprintf": (3, 99, set()),
+    # v* 家族（可变参数转发，stdarg.h 配套）
+    "vprintf": (2, 2, set()), "vfprintf": (3, 3, set()),
+    "vsprintf": (3, 3, set()), "vsnprintf": (4, 4, set()),
+    "vfscanf": (3, 99, "needs_addr_out"),
+    "vsscanf": (3, 99, "needs_addr_out"),
+    "atoi": (1, 1, set()),
     "atof": (1, 1, set()), "atol": (1, 1, set()),
     "rand": (0, 0, set()), "srand": (1, 1, set()),
     "time": (1, 1, set()), "clock": (0, 0, set()),
@@ -845,6 +851,18 @@ class Analyzer:
                 return False
             return (self.block_returns_of_stmt(s.then)
                     and self.block_returns_of_stmt(s.els))
+        if isinstance(s, Switch):
+            # switch 的每个分支都 return，且带 default（保证无遗漏）
+            # → 一定返回。否则 switch 后的代码仍可能执行。
+            # 早期不识别 switch，classify() 的 switch 每支 return
+            # 也被报 W8（实测 stu_32，gcc 零诊断）。
+            # Case 节点：value=None 表示 default，stmt 是分支体。
+            if not s.body or not s.body.stmts:
+                return False
+            cases = [x for x in s.body.stmts if isinstance(x, Case)]
+            if not cases or not any(x.value is None for x in cases):
+                return False          # 没有 default，switch 后仍可能执行
+            return all(self.block_returns_of_stmt(c.stmt) for c in cases)
         return False
 
     def _has_any_return(self, node, _depth=0) -> bool:
@@ -864,6 +882,11 @@ class Analyzer:
         if isinstance(node, Switch):
             return any(self._has_any_return(s, _depth + 1)
                        for s in (node.body.stmts if node.body else []))
+        if isinstance(node, Case):
+            # Case 里有 return，但 _has_any_return 原来不认识 Case
+            # 节点 —— 于是 classify() 的 switch 每支 return 被
+            # 误判"没有 return"（实测 stu_32，gcc 零诊断）。
+            return self._has_any_return(node.stmt, _depth + 1)
         return False
 
     # ---- 声明 ----
@@ -3030,6 +3053,8 @@ class Analyzer:
         "memmove": "string.h", "memcmp": "string.h",
         "memchr": "string.h",
         "printf": "stdio.h", "fprintf": "stdio.h",
+        "vprintf": "stdio.h", "vfprintf": "stdio.h",
+        "vsprintf": "stdio.h", "vsnprintf": "stdio.h",
         "sprintf": "stdio.h", "snprintf": "stdio.h",
         "scanf": "stdio.h", "fscanf": "stdio.h",
         "sscanf": "stdio.h", "puts": "stdio.h",
