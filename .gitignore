@@ -201,3 +201,25 @@ build/
 *.zip
 csub-v1.0-win64.zip
 
+
+# 调试残留
+_m.*
+_t.*
+_tf.*
+_ta.*
+_tb.*
+_tc.*
+_td.*
+_te.*
+_q.c
+_f.c
+_demo.*
+_ref.*
+_conf.*
+_g.exe
+
+_m2d.py
+_t2d*.py
+_apitest.py
+_shot*.py
+
