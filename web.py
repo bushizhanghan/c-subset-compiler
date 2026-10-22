@@ -636,7 +636,11 @@ main{
 .code-wrap .hl .f{color:#d2a8ff}
 .code-wrap .hl .t{color:#56d4dd;font-weight:500}
 
-textarea{
+/* 代码编辑区专用：文字透明（底下有语法高亮层）。
+   必须限定 #code——通用 textarea 选择器会命中 stdin 输入框，
+   -webkit-text-fill-color 优先级高于 color，导致输入的文字
+   全透明看不见（实测踩坑）。 */
+#code{
   position:relative;z-index:1;width:100%;height:100%;
   padding:16px 18px;
   background:transparent;color:transparent;
@@ -646,21 +650,34 @@ textarea{
   -webkit-text-fill-color:transparent;
   scrollbar-width:thin;
 }
-textarea::placeholder{
+#code::placeholder{
   color:#5d6680;line-height:2.1;
   -webkit-text-fill-color:#5d6680;
 }
-textarea::selection{
+#code::selection{
   background:rgb(168 85 247 / .32);
   -webkit-text-fill-color:transparent;
 }
+/* stdin 输入框：正常显示文字 */
+#run-stdin{
+  color:var(--text);
+  -webkit-text-fill-color:var(--text);
+  caret-color:var(--c-cyan);
+}
+#run-stdin::selection{
+  background:rgb(168 85 247 / .32);
+  -webkit-text-fill-color:var(--text);
+}
 
 /* 滚动条 */
-textarea::-webkit-scrollbar,#out::-webkit-scrollbar,
+#code::-webkit-scrollbar,#run-stdin::-webkit-scrollbar,
+#out::-webkit-scrollbar,
 #irpane::-webkit-scrollbar{width:10px;height:10px}
-textarea::-webkit-scrollbar-track,#out::-webkit-scrollbar-track,
+#code::-webkit-scrollbar-track,#run-stdin::-webkit-scrollbar-track,
+#out::-webkit-scrollbar-track,
 #irpane::-webkit-scrollbar-track{background:transparent}
-textarea::-webkit-scrollbar-thumb,#out::-webkit-scrollbar-thumb,
+#code::-webkit-scrollbar-thumb,#run-stdin::-webkit-scrollbar-thumb,
+#out::-webkit-scrollbar-thumb,
 #irpane::-webkit-scrollbar-thumb{
   background:linear-gradient(180deg,#a855f7,#22d3ee);
   border-radius:10px;border:3px solid transparent;
