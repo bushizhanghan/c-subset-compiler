@@ -1401,17 +1401,41 @@ class Analyzer:
             if sym.kind == "func":
                 return VT("func")
             if not sym.initialized:
-                # 同一个变量只报第一次。学生在循环里反复用一个
-                # 未初始化变量时（实测 stu_01 的 while(a!='\\0')），
-                # 早期版本每个使用点都报，一条错误刷出 3 行，
-                # 学生以为有 3 个错，实际只有 1 个。
-                key = (self.cur_func.name if self.cur_func else "",
-                       sym.line, sym.col)
-                if key not in self._reported_e2:
-                    self._reported_e2.add(key)
-                    self.err("E2", e.line, e.col,
-                             f"使用了未初始化的变量 {e.name!r}",
-                             f"它声明在 {sym.line}:{sym.col}，但没有赋初值")
+                # 未知 typedef 的**结构体值类型**（Windows API 的
+                # COORD / CONSOLE_CURSOR_INFO 等）：学生通常逐成员
+                # 赋值（coord.X = x; coord.Y = y;），成员级初始化
+                # 追踪不认识这种写法，直接放行。
+                # 但**指针类型不放行** —— 指针必须显式初始化，
+                # 逐成员赋值救不了它（Coord *p; p->X = 1 会直接崩）。
+                # 指针性看 typedef 展开后的真身：`typedef struct
+                # Stu {...} *StudentPtr` 的别名展开后 ptr=1，
+                # 但声明层的 vtype.ptr 是 0 —— 只看 ptr 会把
+                # StudentPtr 误放行（实测变异 78/79 漏 1 条）。
+                _b = (sym.vtype.base if sym.vtype else "int").replace(
+                    "struct ", "")
+                _td = self.typedefs.get(sym.vtype.base) \
+                    if sym.vtype is not None else None
+                _eff_ptr = (sym.vtype.ptr if sym.vtype is not None else 0)
+                if _td is not None:
+                    _eff_ptr += _td.ptr
+                _is_ptr = _eff_ptr > 0
+                if not _is_ptr and _b not in ("int", "char", "long",
+                                              "short", "float", "double",
+                                              "void"):
+                    sym.initialized = True     # 未知结构体值类型，假定已初始化
+                else:
+                    # 同一个变量只报第一次。学生在循环里反复用一个
+                    # 未初始化变量时（实测 stu_01 的 while(a!='\\0')），
+                    # 早期版本每个使用点都报，一条错误刷出 3 行，
+                    # 学生以为有 3 个错，实际只有 1 个。
+                    key = (self.cur_func.name if self.cur_func else "",
+                           sym.line, sym.col)
+                    if key not in self._reported_e2:
+                        self._reported_e2.add(key)
+                        self.err("E2", e.line, e.col,
+                                 f"使用了未初始化的变量 {e.name!r}",
+                                 f"它声明在 {sym.line}:{sym.col}，"
+                                 f"但没有赋初值")
             sym.used = True
             # 数组名在表达式里退化成首地址（C 的数组退化）
             return _vt_of_type(sym.vtype, decay=True)

@@ -1378,14 +1378,39 @@ class Parser:
                 and self.cur.value in ("int", "float", "char", "double",
                                        "void", "signed", "unsigned",
                                        "short", "long")):
+            base = self.cur.value
+            is_float = base in ("float", "double")
             while (self.cur.kind == Tok.KW
                    and self.cur.value in ("signed", "unsigned", "short",
                                           "long", "int", "char", "float",
                                           "double", "void")):
+                # "long float"/"short double" 这类怪组合不存在，
+                # 以最后一个出现的基础词为准（(unsigned long) 等）。
+                if self.cur.value in ("float", "double"):
+                    base = self.cur.value
+                    is_float = True
+                elif self.cur.value in ("int", "char", "long", "short",
+                                        "signed", "unsigned"):
+                    if self.cur.value in ("int", "char", "long", "short"):
+                        base = self.cur.value
                 self.advance()
+            ptr = 0
             while self.at("*"):
                 self.advance()
-            return Type(base="int")
+                ptr += 1
+            # 记录真实的基础类型和浮点标记。
+            # 早期这里无条件返回 Type(base="int")，导致
+            # (float)j/(float)m 被当成 int/int —— W3 对
+            # "显式转 float 再除"的合法代码误报（实测 stu_26），
+            # (double)/(char) 的所有类型检查也全部失准。
+            ty = Type(base=base if base not in ("signed", "unsigned")
+                      else "int")
+            ty.long_flag = False
+            if is_float:
+                ty.base = base if base in ("float", "double") else "float"
+            if ptr:
+                ty.ptr = ptr
+            return ty
         if self.cur.kind == Tok.KW and self.cur.value == "struct":
             self.advance()
             if self.at_kind(Tok.IDENT):
