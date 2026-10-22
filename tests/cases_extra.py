@@ -1261,3 +1261,52 @@ int add(int a, int b) { return a + b; }
 int main() { return add(1, 2); }
 """, set()),
 ]
+
+
+# ---- 结构体里的函数指针成员 ----
+# 来源：GitHub c_ds_algo 的 array_list（"面向对象 C"写法）。
+# 修复过程踩了四个坑：off-by-one 两次、回退后掉进旧分支、
+# depth 起步错误 —— 每个都是静默失效，靠最小化矩阵测试揪出。
+EXTRA_CASES += [
+    # 函数指针成员（int 返回）
+    ("ok_fnptr_member_int", """
+typedef struct list {
+    int (*f)(int a);
+} list;
+int main() { return 0; }
+""", set()),
+
+    # 函数指针成员（void* 返回）
+    ("ok_fnptr_member_voidptr", """
+typedef struct list {
+    void* (*g)(int a);
+} list;
+int main() { return 0; }
+""", set()),
+
+    # 函数指针成员（void** 返回）+ 普通成员混合
+    ("ok_fnptr_member_mixed", """
+typedef struct list {
+    void** a;
+    int (*f)(int);
+    int n;
+} list;
+int main() { return 0; }
+""", set()),
+
+    # 反向：函数指针成员不该触发 E18/W11 等
+    ("ok_fnptr_no_false_positives", """
+typedef struct obj {
+    int value;
+    int (*get)(struct obj* self);
+    void (*set)(struct obj* self, int v);
+} obj;
+int my_get(struct obj* self) { return self->value; }
+int main() {
+    obj o;
+    o.value = 5;
+    o.get = my_get;
+    return o.get(&o);
+}
+""", set()),
+]

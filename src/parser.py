@@ -617,6 +617,53 @@ class Parser:
         while not self.at("}"):
             if self.at_kind(Tok.EOF):
                 raise ParseError("结构体未闭合（缺少 }）", 0, 0)
+            # 函数指针成员：boolean (*insert)(...) 或 void* (*get)(...)
+            # 返回类型可能带 *（void*），所以要先吃掉类型和连续的 *，
+            # 再看是否是 "(* 成员名 ) (" 形态。
+            # 早期完全不认（7 条 SYN）；第一次修时用
+            # peek()=='(' and peek(1)=='*' 判定，off-by-one 且
+            # 不支持 void* 返回类型，两条路都不通
+            # （实测 c_ds_algo 的 array_list，两种写法都有）。
+            if (self.cur.kind == Tok.KW or self.cur.kind == Tok.IDENT):
+                _save = self.i
+                self.advance()                      # 返回类型词
+                _stars = 0
+                while self.at("*"):
+                    self.advance()
+                    _stars += 1
+                if self.at("(") and self.peek().value == "*" \
+                        and self.peek(2).kind == Tok.IDENT:
+                    self.advance()                  # (
+                    self.advance()                  # *
+                    fname = self.expect_kind(Tok.IDENT,
+                                             "函数指针成员名").value
+                    self.expect(")")                # )
+                    # 参数列表：expect(")") 已消费函数指针的闭括号，
+                    # 参数列表自己的 "(" 还没吃 —— 先吃 "("，
+                    # 再 depth 从 1 开始配对到它的 ")"。
+                    # 三个坑都踩过：depth 从 1 起步但没先吃 "("
+                    # → 循环吞到文件尾；depth 从 0 起步的 while
+                    # depth>0 → 一次都不执行（先判断后吃）。
+                    self.expect("(")                # 参数列表的 (
+                    depth = 1
+                    while depth > 0 and not self.at_kind(Tok.EOF):
+                        if self.at("("):
+                            depth += 1
+                        elif self.at(")"):
+                            depth -= 1
+                        self.advance()
+                    members.append((Type(base="int", ptr=1), fname))
+                    if self.at(","):
+                        self.advance()
+                        continue
+                    self.expect(";")
+                    continue
+                # 不是函数指针，回退并交给普通成员解析。
+                # 注意必须直接落下去走 parse_type()，不能再进
+                # 旧分支 —— 第一版修复在这里漏了旧代码，
+                # 回退后掉进无条件 expect，所有成员全炸
+                # （void** arr; 也报"期望函数指针成员名"）。
+                self.i = _save
             mty = self.parse_type()
             if mty is None:
                 t = self.cur

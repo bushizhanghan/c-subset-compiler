@@ -2107,6 +2107,11 @@ class Analyzer:
         got_ptr = (vt.ptr > 0 or vt.array is not None or bool(vt.dims))
         if want_ptr == got_ptr:
             return
+        # 空指针常量（NULL/0）返回给指针函数是合法惯用法
+        # （switch 的 default: return NULL;），不报
+        # （实测 c_ds_algo 的 to_string）。
+        if want_ptr and _is_null_const(ret.value):
+            return
         if want_ptr:
             self.warn("W27", ret.line, ret.col,
                       f"函数声明返回指针，"
