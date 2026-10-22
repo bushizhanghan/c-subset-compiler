@@ -37,6 +37,9 @@ _STD_MACRO_NAMES = {
     "EXIT_FAILURE", "CLOCK_MONOTONIC", "CLOCK_REALTIME", "SEEK_SET",
     "SEEK_CUR", "SEEK_END", "RAND_MAX", "INT_MAX", "INT_MIN", "M_PI",
     "BUFSIZ", "L_tmpnam",
+    # 编译器预定义（与语义层 STD_MACROS 同步，加宏要改两处）
+    "__func__", "__FUNCTION__", "__DATE__", "__TIME__",
+    "__FILE__", "__LINE__", "__STDC__",
 }
 
 

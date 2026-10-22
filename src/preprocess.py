@@ -275,9 +275,27 @@ def preprocess(src: str) -> PreResult:
                         idx = end + 1
                         continue
                     body = m.body
+                    # 字符串化 #x 必须在参数替换**之前**处理：
+                    # C 标准规定 # 后的参数取实参原文、不参与替换。
+                    # 顺序反了的话 #x 已变成 #实参，再拿实参当参数名
+                    # 去查表必然落空（实测 stu_42：
+                    # STRINGIFY(hello world) 丢成 "hello"）。
+                    # 负向断言 (?<!#) 排除 ## 拼接符 —— 早期没排除，
+                    # CONCAT(va,r) 的 ##b 被当成字符串化，
+                    # 展开成 va#"r" = 42 直接语法崩（实测 stu_42）。
+                    def _stringify(mo):
+                        return '"' + _find_arg(m.params, args,
+                                               mo.group(1)) + '"'
+                    body = re.sub(r"(?<!#)#[ \t]*([A-Za-z_]\w*)",
+                                  _stringify, body)
+                    # 拼接运算符 a##b：**先替换参数，再删 ##**。
+                    # 早期先删 ## 再替换，宏体 ab 里的 a/b 不是独立
+                    # 单词，\b 边界匹配不上，CONCAT(va, r) 展开成
+                    # ab 而不是 var（实测 stu_42 两条 E1 连带）。
                     for pname, aval in zip(m.params, args):
                         body = re.sub(r"\b" + re.escape(pname) + r"\b",
                                       aval, body)
+                    body = body.replace("##", "")
                     line = line[:pos] + body + line[end + 1:]
                     changed = True
                     idx = pos + len(body)
@@ -371,6 +389,17 @@ if __name__ == "__main__":
         print(f"   {ln}: {why}")
     print("=== 预处理后源码 ===")
     print(r.text)
+
+
+def _find_arg(params, args, name):
+    """在宏参数里找 name 对应的原始实参文本（字符串化用）。
+
+    找不到就返回 name 本身（防御：宏体里引用了不存在的参数）。
+    """
+    for p, a in zip(params, args):
+        if p == name:
+            return a.strip()
+    return name
 
 
 def _drop_unknown_inter_string_macros(line: str) -> str:

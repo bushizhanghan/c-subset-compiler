@@ -106,7 +106,14 @@ STD_MACROS = {"NULL": "0", "EOF": "-1", "EXIT_SUCCESS": "0",
               "CLOCK_MONOTONIC": "1", "CLOCK_REALTIME": "0",
               "SEEK_SET": "0", "SEEK_CUR": "1", "SEEK_END": "2",
               "RAND_MAX": "32767", "INT_MAX": "2147483647",
-              "INT_MIN": "-2147483648", "M_PI": "3.141592653589793"}
+              "INT_MIN": "-2147483648", "M_PI": "3.141592653589793",
+              # __func__ / __FUNCTION__：编译器提供的当前函数名
+              # （C99 起标准，不是宏但行为等同字符串常量）。
+              # 不认就报"使用了未声明的变量 '__func__'"
+              # （实测 stu_42，gcc 零诊断）。
+              "__func__": '"?"', "__FUNCTION__": '"?"',
+              "__DATE__": '"?"', "__TIME__": '"?"',
+              "__FILE__": '"?"', "__LINE__": "0", "__STDC__": "1"}
 
 # 参数必须是指针/字符串的标准库函数：名字 -> 必须是地址的参数下标集合。
 # 用于 W26（指针参数收到非指针值）。只收录签名确定的，拿不准的不放。
@@ -1420,6 +1427,12 @@ class Analyzer:
             sym = self.scope.lookup(e.name)
             # NULL 这类标准库常量
             if sym is None and e.name in STD_MACROS:
+                _v = STD_MACROS[e.name]
+                # __func__/__FILE__ 的值是字符串（带引号），
+                # 传给 %s 完全合法。早期一律返回 int，
+                # W23 误报"%s 需要地址"（实测 stu_42）。
+                if isinstance(_v, str) and _v.startswith('"'):
+                    return VT("char", ptr=1)
                 return VT("int")
             # sizeof(Node) 里的 typedef 名
             if sym is None and e.name in self.typedefs:
