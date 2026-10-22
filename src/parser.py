@@ -30,6 +30,16 @@ class Program(Node):
     enum_consts: set = field(default_factory=set)
 
 
+# 标准库常量宏的名字集合。parser 用它排除"NULL 被当成类型名"的误判
+# —— (NULL) 是空指针常量写法，语义层有自己的 STD_MACROS 表。
+_STD_MACRO_NAMES = {
+    "NULL", "true", "false", "TRUE", "FALSE", "EOF", "EXIT_SUCCESS",
+    "EXIT_FAILURE", "CLOCK_MONOTONIC", "CLOCK_REALTIME", "SEEK_SET",
+    "SEEK_CUR", "SEEK_END", "RAND_MAX", "INT_MAX", "INT_MIN", "M_PI",
+    "BUFSIZ", "L_tmpnam",
+}
+
+
 @dataclass
 class FuncDef(Node):
     name: str = ""
@@ -1537,7 +1547,11 @@ class Parser:
             # 1) 是已见过的变量 -> 绝不是类型，回退（(*(init))() 就靠这条）；
             # 2) 是已登记的 typedef 或内置类型名 -> 是转换；
             # 3) 带星号 -> 视为转换（(Node*)0 这类指针转换）。
-            if name in self.known_vars:
+            # 4) 标准宏名（NULL/true/EXIT_SUCCESS...）不是类型 ——
+            #    (NULL) 是空指针常量写法，当类型名会让后面的
+            #    parse_unary 吃到 ';'，报"无法解析的表达式起始"
+            #    （实测 stu_30：return (NULL); 直接 SYN 崩）。
+            if name in self.known_vars or name in _STD_MACRO_NAMES:
                 self.i = start
                 return None
             if ptr == 0 and name not in self.known_types:
