@@ -115,367 +115,779 @@ PAGE = r'''<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>csub · C 代码查错</title>
 <style>
+/* ══════════════════════════════════════════════════════════
+   csub 诊断台
+   深空黑 + 冷光 + 玻璃拟态
+   ══════════════════════════════════════════════════════════ */
 :root{
-  --bg:#0a0c11;
-  --surface:#11141c;
-  --surface-2:#161a24;
-  --surface-3:#1c2130;
-  --line:#232838;
-  --line-bright:#2e3648;
-  --text:#e4e8f0;
-  --text-2:#9aa4b8;
-  --text-3:#636d82;
-  --accent:#38bdf8;
-  --accent-dim:#0e7490;
-  --err:#fb7185;
-  --err-bg:#2a1218;
-  --warn:#fbbf24;
-  --warn-bg:#2a2210;
-  --ok:#34d399;
-  --ok-bg:#0f241d;
-  --mono:"Cascadia Code","JetBrains Mono","Fira Code",Consolas,monospace;
+  /* 表面层次：从最底到最亮 */
+  --void:#07090d;
+  --bg:#0b0e14;
+  --surface:#10141c;
+  --surface-2:#171c26;
+  --surface-3:#1f2632;
+  --line:rgb(255 255 255 / .06);
+  --line-2:rgb(255 255 255 / .10);
+  --line-3:rgb(255 255 255 / .16);
+
+  --text:#eef1f6;
+  --text-2:#a2acc0;
+  --text-3:#697386;
+
+  --cyan:#22d3ee;
+  --cyan-2:#0891b2;
+  --cyan-glow:rgb(34 211 238 / .5);
+
+  --rose:#fb7185;
+  --rose-2:#9f1239;
+  --amber:#fbbf24;
+  --amber-2:#92400e;
+  --emerald:#34d399;
+  --emerald-2:#065f46;
+
+  --mono:"Cascadia Code","JetBrains Mono","Fira Code",
+         ui-monospace,Consolas,monospace;
   --sans:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+
+  --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:20px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
-  background:var(--bg);
+  background:var(--void);
   color:var(--text);
   font:14px/1.6 var(--sans);
   display:flex;flex-direction:column;
   overflow:hidden;
   -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
 }
 
-/* 背景：极淡的网格 + 顶部光晕，不抢内容 */
-body::before{
-  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
-  background:
-    radial-gradient(ellipse 80% 50% at 50% -20%,
-      rgb(56 189 248 / .10), transparent 70%),
-    linear-gradient(var(--line) 1px, transparent 1px) 0 0/100% 48px,
-    linear-gradient(90deg, var(--line) 1px, transparent 1px) 0 0/48px 100%;
-  opacity:.35;
-  mask-image:radial-gradient(ellipse 100% 70% at 50% 0%, #000 40%, transparent 100%);
+/* ── 背景层：网格 + 顶部光锥 + 噪点 ── */
+.bg{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.bg .mesh{
+  position:absolute;inset:-50%;
+  background-image:
+    linear-gradient(rgb(255 255 255 / .022) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / .022) 1px, transparent 1px);
+  background-size:56px 56px;
+  /* 网格往边缘淡出 */
+  mask-image:radial-gradient(ellipse 70% 60% at 50% 38%,
+              #000 25%, transparent 78%);
+  transform:perspective(700px) rotateX(1.5deg);
 }
+.bg .beam{
+  position:absolute;left:50%;top:-38vh;
+  width:130vw;height:80vh;
+  transform:translateX(-50%);
+  background:radial-gradient(ellipse at 50% 0%,
+    rgb(34 211 238 / .13), rgb(34 211 238 / .04) 38%, transparent 68%);
+  filter:blur(28px);
+}
+.bg .beam-2{
+  position:absolute;left:50%;top:-10vh;
+  width:70vw;height:46vh;transform:translateX(-50%);
+  background:radial-gradient(ellipse at 50% 0%,
+    rgb(99 102 241 / .08), transparent 64%);
+  filter:blur(40px);
+}
+/* 噪点：一层极细的 SVG 噪声，让深色面不平坦 */
+.bg .noise{
+  position:absolute;inset:0;opacity:.028;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+/* 光标跟随的冷光 */
+.bg .cursor-light{
+  position:absolute;width:680px;height:680px;
+  border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle,
+    rgb(34 211 238 / .075), transparent 62%);
+  transform:translate(-50%,-50%);
+  transition:opacity .4s;
+  opacity:0;
+}
+body.has-cursor .bg .cursor-light{opacity:1}
 
 /* ── 顶栏 ── */
 header{
-  position:relative;z-index:2;flex-shrink:0;
-  display:flex;align-items:center;gap:14px;
-  padding:0 20px;height:56px;
-  background:linear-gradient(180deg,var(--surface),transparent);
-  border-bottom:1px solid var(--line);
+  position:relative;z-index:10;flex-shrink:0;
+  height:62px;display:flex;align-items:center;gap:16px;
+  padding:0 22px;
+  background:linear-gradient(180deg,
+    rgb(16 20 28 / .92), rgb(16 20 28 / .55));
+  backdrop-filter:blur(20px) saturate(150%);
+  -webkit-backdrop-filter:blur(20px) saturate(150%);
+  border-bottom:1px solid var(--line-2);
 }
-.brand{display:flex;align-items:center;gap:10px;flex-shrink:0}
-.logo{
-  width:26px;height:26px;border-radius:7px;
-  background:linear-gradient(135deg,var(--accent),var(--accent-dim));
+/* 顶栏底部一道细渐变线 */
+header::after{
+  content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;
+  background:linear-gradient(90deg,
+    transparent, rgb(34 211 238 / .35) 22%,
+    rgb(34 211 238 / .12) 50%, transparent 78%);
+}
+
+/* 品牌 */
+.brand{display:flex;align-items:center;gap:11px;flex-shrink:0}
+.mark{
+  position:relative;width:32px;height:32px;flex-shrink:0;
+  border-radius:9px;
+  background:
+    linear-gradient(145deg, rgb(34 211 238 / .9), rgb(8 145 178 / .85));
   display:grid;place-items:center;
-  font:600 13px/1 var(--mono);color:#001018;
-  box-shadow:0 0 20px rgb(56 189 248 / .3);
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / .12) inset,
+    0 4px 18px rgb(34 211 238 / .3),
+    0 0 42px rgb(34 211 238 / .16);
 }
-.brand h1{font-size:15px;font-weight:600;letter-spacing:-.01em}
-.brand .sub{
+.mark span{
+  font:700 15px/1 var(--mono);color:#031018;
+  letter-spacing:-.04em;
+}
+/* 标记外一圈很淡的呼吸环 */
+.mark::after{
+  content:"";position:absolute;inset:-4px;border-radius:12px;
+  border:1px solid rgb(34 211 238 / .18);
+  animation:breathe 4s ease-in-out infinite;
+}
+@keyframes breathe{
+  0%,100%{opacity:.5;transform:scale(1)}
+  50%{opacity:1;transform:scale(1.06)}
+}
+
+.title-wrap{display:flex;flex-direction:column;gap:1px;line-height:1.15}
+.title{
+  font-size:15px;font-weight:650;letter-spacing:-.015em;
+  color:var(--text);
+}
+.title em{
+  font-style:normal;
+  color:#67e8f9;                       /* fallback：不支持 clip 时也可见 */
+  background:linear-gradient(92deg,#67e8f9,#22d3ee 55%,#38bdf8);
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;
+}
+.subtitle{
   font:11px/1 var(--mono);color:var(--text-3);
-  border:1px solid var(--line-bright);border-radius:4px;
-  padding:3px 5px;margin-left:2px;
+  letter-spacing:.02em;
 }
 .spacer{flex:1}
 
-/* 按钮 */
+/* ── 按钮 ── */
 .btn{
-  display:inline-flex;align-items:center;gap:6px;
-  height:32px;padding:0 13px;
-  background:var(--surface-2);color:var(--text-2);
-  border:1px solid var(--line-bright);border-radius:7px;
-  font:500 12.5px/1 var(--sans);cursor:pointer;
-  transition:background .15s,border-color .15s,color .15s,
-             transform .1s;
-  white-space:nowrap;
+  position:relative;
+  display:inline-flex;align-items:center;gap:7px;
+  height:34px;padding:0 14px;
+  background:rgb(255 255 255 / .035);
+  color:var(--text-2);
+  border:1px solid var(--line-2);
+  border-radius:var(--r-sm);
+  font:500 12.5px/1 var(--sans);
+  cursor:pointer;white-space:nowrap;
+  transition:background .16s,border-color .16s,color .16s,
+             transform .1s,box-shadow .16s;
 }
-.btn:hover{background:var(--surface-3);color:var(--text);
-           border-color:#3d475e}
+.btn svg{width:14px;height:14px;flex-shrink:0;
+         stroke:currentColor;fill:none;stroke-width:1.8;
+         stroke-linecap:round;stroke-linejoin:round}
+.btn:hover{
+  background:rgb(255 255 255 / .07);
+  border-color:var(--line-3);color:var(--text);
+}
 .btn:active{transform:translateY(1px)}
-.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.btn.primary{
-  background:linear-gradient(180deg,#3ec8fb,#0ea5d9);
-  color:#001820;border-color:#5fd4ff;font-weight:600;
-  box-shadow:0 2px 12px rgb(56 189 248 / .25);
+.btn:focus-visible{
+  outline:2px solid var(--cyan);outline-offset:2px;
 }
-.btn.primary:hover{filter:brightness(1.07)}
+.btn.primary{
+  background:linear-gradient(180deg,#2dd4ef,#0891b2);
+  color:#02181d;border-color:rgb(103 232 249 / .6);
+  font-weight:650;
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / .25) inset,
+    0 3px 14px rgb(34 211 238 / .28);
+}
+.btn.primary:hover{
+  background:linear-gradient(180deg,#4ce0f7,#0ba5c9);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / .3) inset,
+    0 4px 20px rgb(34 211 238 / .4);
+}
 .btn kbd{
-  font:11px/1 var(--mono);opacity:.6;
-  border:1px solid rgb(0 0 0 / .25);border-radius:3px;
-  padding:2px 4px;margin-left:1px;
+  font:700 10.5px/1 var(--mono);
+  padding:3px 5px;border-radius:4px;
+  background:rgb(2 24 29 / .22);
+  border:1px solid rgb(2 24 29 / .2);
+  color:#02181d;
+  opacity:.85;
 }
 
-/* ── 主体三栏 ── */
+/* ── 主区 ── */
 main{
-  position:relative;z-index:1;flex:1;
+  position:relative;z-index:5;flex:1;
   display:grid;grid-template-columns:1fr 1fr;
-  min-height:0;
+  min-height:0;padding:14px;gap:14px;
 }
-.pane{display:flex;flex-direction:column;min-width:0;min-height:0}
-.pane+.pane{border-left:1px solid var(--line)}
+.pane{
+  position:relative;
+  display:flex;flex-direction:column;
+  min-width:0;min-height:0;
+  background:linear-gradient(180deg,
+    rgb(23 28 38 / .72), rgb(16 20 28 / .88));
+  border:1px solid var(--line-2);
+  border-radius:var(--r-lg);
+  overflow:hidden;
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / .04) inset,
+    0 20px 50px rgb(0 0 0 / .45),
+    0 0 0 1px rgb(0 0 0 / .2);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+}
+/* 面板顶部一道高光 */
+.pane::before{
+  content:"";position:absolute;left:0;right:0;top:0;height:1px;
+  background:linear-gradient(90deg,
+    transparent, rgb(255 255 255 / .14) 35%,
+    rgb(255 255 255 / .14) 65%, transparent);
+  pointer-events:none;z-index:2;
+}
 
 .pane-head{
-  flex-shrink:0;height:38px;
-  display:flex;align-items:center;gap:8px;
+  flex-shrink:0;height:42px;
+  display:flex;align-items:center;gap:9px;
   padding:0 16px;
-  background:var(--surface);
   border-bottom:1px solid var(--line);
-  font-size:12px;color:var(--text-2);
+  background:rgb(11 14 20 / .5);
   user-select:none;
 }
-.pane-head .dot{
-  width:6px;height:6px;border-radius:50%;
-  background:var(--accent);box-shadow:0 0 8px var(--accent);
+.pane-head .lamp{
+  width:7px;height:7px;border-radius:50%;
+  background:var(--text-3);flex-shrink:0;
+  transition:background .2s,box-shadow .2s;
 }
-.pane-head .dot.muted{background:var(--text-3);box-shadow:none}
-.pane-head .right{margin-left:auto;display:flex;gap:10px;
-                   align-items:center;font:11.5px var(--mono);
-                   color:var(--text-3)}
+.pane-head .lamp.on{
+  background:var(--cyan);
+  box-shadow:0 0 10px var(--cyan-glow);
+}
+.pane-head .lamp.err{
+  background:var(--rose);
+  box-shadow:0 0 10px rgb(251 113 133 / .5);
+}
+.pane-head .name{
+  font:600 12px/1 var(--sans);
+  color:var(--text-2);letter-spacing:.01em;
+}
+.pane-head .meta{
+  margin-left:auto;display:flex;align-items:center;gap:10px;
+  font:11.5px/1 var(--mono);color:var(--text-3);
+}
+.pane-head .meta .sep{color:var(--line-3)}
 
 /* ── 编辑器 ── */
 .editor{flex:1;display:flex;min-height:0;position:relative}
+
 .gutter{
-  flex-shrink:0;width:56px;
-  padding:14px 0;
+  flex-shrink:0;width:58px;
+  padding:16px 0;
+  overflow:hidden;user-select:none;
+  font:12.5px/1.78 var(--mono);
   text-align:right;
-  font:12.5px/1.75 var(--mono);
-  color:var(--text-3);
-  background:var(--surface);
+  color:#7d8798;
+  background:rgb(11 14 20 / .42);
   border-right:1px solid var(--line);
-  overflow:hidden;
-  user-select:none;
 }
-/* 每行一个块：行号必须块级，否则挤成一行 */
 .gutter .gl{
-  padding-right:10px;
+  padding-right:11px;
   border-right:2px solid transparent;
-  transition:color .12s,border-color .12s;
+  transition:color .14s,border-color .14s,background .14s;
 }
-.gutter .gl.hi{
-  color:var(--warn);font-weight:600;
-  border-right-color:var(--warn);
-  background:rgb(251 191 36 / .07);
+.gutter .gl.warn{
+  color:var(--amber);font-weight:600;
+  border-right-color:var(--amber);
+  background:linear-gradient(90deg,
+    transparent, rgb(251 191 36 / .1));
 }
-.gutter .gl.hi-e{
-  color:var(--err);font-weight:700;
-  border-right-color:var(--err);
-  background:rgb(251 113 133 / .09);
+.gutter .gl.err{
+  color:var(--rose);font-weight:700;
+  border-right-color:var(--rose);
+  background:linear-gradient(90deg,
+    transparent, rgb(251 113 133 / .13));
 }
+
+/* 代码区：透明 textarea 叠在高亮层上 */
+.code-wrap{flex:1;position:relative;min-width:0;overflow:hidden}
+.code-wrap .hl{
+  position:absolute;inset:0;
+  padding:16px 18px;
+  font:12.5px/1.78 var(--mono);
+  tab-size:4;white-space:pre;overflow:hidden;
+  pointer-events:none;color:var(--text);
+  word-break:break-all;
+}
+.code-wrap .hl .c{color:#5a6b82;font-style:italic}   /* 注释 */
+.code-wrap .hl .s{color:#7fd88f}                     /* 字符串 */
+.code-wrap .hl .p{color:#c792ea}                     /* 预处理 */
+.code-wrap .hl .k{color:#67e8f9;font-weight:500}     /* 关键字 */
+.code-wrap .hl .n{color:#fbbf24}                     /* 数字 */
+.code-wrap .hl .f{color:#a5b4fc}                     /* 函数名 */
+.code-wrap .hl .t{color:#5eead4}                     /* 类型 */
+
 textarea{
-  flex:1;width:100%;
-  padding:14px 16px;
-  background:transparent;color:var(--text);
+  position:relative;z-index:1;
+  width:100%;height:100%;
+  padding:16px 18px;
+  background:transparent;color:transparent;
   border:0;outline:0;resize:none;
-  font:12.5px/1.75 var(--mono);
+  font:12.5px/1.78 var(--mono);
   tab-size:4;
-  caret-color:var(--accent);
+  caret-color:var(--cyan);
+  scrollbar-width:thin;
+  -webkit-text-fill-color:transparent;
 }
-textarea::placeholder{color:var(--text-3)}
-textarea::selection{background:rgb(56 189 248 / .25)}
+textarea::selection{
+  background:rgb(34 211 238 / .26);
+  -webkit-text-fill-color:transparent;
+}
+textarea::placeholder{
+  color:var(--text-3);line-height:2.1;
+  -webkit-text-fill-color:var(--text-3);
+}
 
-/* ── 诊断输出 ── */
-#out{flex:1;overflow-y:auto;padding:16px;scroll-behavior:smooth}
-#out::-webkit-scrollbar,.gutter::-webkit-scrollbar{
-  width:9px;height:9px}
-#out::-webkit-scrollbar-thumb{
-  background:var(--line-bright);border-radius:9px;
-  border:2px solid var(--bg)}
-#out::-webkit-scrollbar-thumb:hover{background:#3d475e}
+/* 滚动条 */
+textarea::-webkit-scrollbar,
+#out::-webkit-scrollbar,
+#irpane::-webkit-scrollbar{width:10px;height:10px}
+textarea::-webkit-scrollbar-track,
+#out::-webkit-scrollbar-track,
+#irpane::-webkit-scrollbar-track{background:transparent}
+textarea::-webkit-scrollbar-thumb,
+#out::-webkit-scrollbar-thumb,
+#irpane::-webkit-scrollbar-thumb{
+  background:rgb(255 255 255 / .09);
+  border-radius:10px;border:3px solid transparent;
+  background-clip:padding-box;
+}
+textarea::-webkit-scrollbar-thumb:hover,
+#out::-webkit-scrollbar-thumb:hover{
+  background:rgb(255 255 255 / .16);
+  background-clip:padding-box;
+}
 
-.placeholder{
+/* ── 诊断流 ── */
+#out{
+  flex:1;overflow-y:auto;padding:16px;
+  scroll-behavior:smooth;
+}
+
+/* 空状态 */
+.empty{
   height:100%;display:flex;flex-direction:column;
-  align-items:center;justify-content:center;gap:14px;
-  color:var(--text-3);text-align:center;padding:20px;
+  align-items:center;justify-content:center;gap:18px;
+  text-align:center;padding:24px;
 }
-.placeholder .big{
-  font-size:38px;opacity:.15;
-  font-family:var(--mono);
+.empty .glyph{
+  width:74px;height:74px;border-radius:20px;
+  display:grid;place-items:center;
+  background:linear-gradient(160deg,
+    rgb(34 211 238 / .09), rgb(34 211 238 / .02));
+  border:1px solid rgb(34 211 238 / .16);
+  box-shadow:0 0 40px rgb(34 211 238 / .08) inset;
 }
-.placeholder .tip{font-size:13px;line-height:1.8;max-width:300px}
-.placeholder kbd{
-  font:11.5px var(--mono);color:var(--text-2);
-  background:var(--surface-2);border:1px solid var(--line-bright);
-  border-radius:4px;padding:2px 6px;
+.empty .glyph svg{
+  width:32px;height:32px;stroke:var(--cyan);opacity:.75;
+  fill:none;stroke-width:1.5;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+.empty h3{
+  font-size:14px;font-weight:600;color:var(--text-2);
+  letter-spacing:.01em;
+}
+.empty p{
+  font-size:12.5px;line-height:1.85;color:var(--text-3);
+  max-width:280px;
+}
+.empty .caps{
+  display:flex;flex-direction:column;gap:7px;
+  margin-top:4px;width:100%;max-width:320px;
+}
+.empty .cap{
+  display:flex;align-items:center;gap:9px;
+  padding:8px 12px;
+  background:rgb(255 255 255 / .022);
+  border:1px solid var(--line);
+  border-radius:8px;
+  font-size:11.5px;line-height:1.5;
+  color:var(--text-2);text-align:left;
+}
+.empty .cap i{
+  width:6px;height:6px;border-radius:50%;flex-shrink:0;
+}
+.empty .cap.dim{opacity:.62}
+.empty .cap.dim b{color:var(--rose);font-weight:600}
+.empty kbd{
+  font:600 11px/1 var(--mono);
+  padding:3px 6px;border-radius:5px;
+  background:var(--surface-3);
+  border:1px solid var(--line-3);
+  color:var(--text-2);
 }
 
-/* 摘要卡 */
+/* 摘要条 */
 .summary{
   display:flex;align-items:center;gap:12px;
-  padding:13px 16px;margin-bottom:14px;
-  border-radius:9px;border:1px solid;
-  animation:rise .25s ease both;
+  padding:14px 16px;margin-bottom:14px;
+  border-radius:var(--r-md);
+  border:1px solid;
+  animation:pop .3s cubic-bezier(.2,.9,.3,1.2) both;
 }
-.summary.good{background:var(--ok-bg);border-color:#1d5c48}
-.summary.bad{background:var(--err-bg);border-color:#6b2634}
-.summary .verdict{
-  font-size:13.5px;font-weight:600;
+.summary.good{
+  background:linear-gradient(100deg,
+    rgb(52 211 153 / .1), rgb(52 211 153 / .03));
+  border-color:rgb(52 211 153 / .28);
+  box-shadow:0 0 30px rgb(52 211 153 / .07) inset;
 }
-.summary.good .verdict{color:var(--ok)}
-.summary.bad .verdict{color:var(--err)}
-.summary .counts{
-  margin-left:auto;display:flex;gap:6px;
-  font:12px var(--mono);
+.summary.bad{
+  background:linear-gradient(100deg,
+    rgb(251 113 133 / .12), rgb(251 113 133 / .03));
+  border-color:rgb(251 113 133 / .3);
+  box-shadow:0 0 30px rgb(251 113 133 / .08) inset;
 }
+.summary .icon{
+  width:34px;height:34px;border-radius:10px;flex-shrink:0;
+  display:grid;place-items:center;
+}
+.summary.good .icon{
+  background:rgb(52 211 153 / .13);
+  border:1px solid rgb(52 211 153 / .26);
+}
+.summary.bad .icon{
+  background:rgb(251 113 133 / .13);
+  border:1px solid rgb(251 113 133 / .26);
+}
+.summary .icon svg{
+  width:17px;height:17px;fill:none;stroke-width:2.2;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+.summary.good .icon svg{stroke:var(--emerald)}
+.summary.bad .icon svg{stroke:var(--rose)}
+.summary .text{display:flex;flex-direction:column;gap:2px}
+.summary .big{
+  font-size:14.5px;font-weight:700;letter-spacing:-.01em;
+  color:var(--text);
+  text-shadow:0 0 20px rgb(0 0 0 / .5);
+}
+.summary.good .big{color:#5eead4}
+.summary.bad .big{color:#fda4af}
+.summary .small{
+  font-size:12px;color:var(--text-2);
+  font-weight:450;
+}
+.summary .chips{margin-left:auto;display:flex;gap:7px}
 .chip{
-  padding:3px 8px;border-radius:5px;
-  border:1px solid var(--line-bright);
-  color:var(--text-2);background:var(--surface-2);
+  display:inline-flex;align-items:center;gap:5px;
+  padding:5px 10px;border-radius:7px;
+  font:600 11.5px/1 var(--mono);
+  border:1px solid var(--line-2);
+  background:rgb(255 255 255 / .03);
+  color:var(--text-2);
 }
-.chip.e{color:var(--err);border-color:#6b2634;background:var(--err-bg)}
-.chip.w{color:var(--warn);border-color:#5c4a18;background:var(--warn-bg)}
+.chip i{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.chip.e{color:var(--rose);border-color:rgb(251 113 133 / .3);
+        background:rgb(251 113 133 / .08)}
+.chip.e i{background:var(--rose);box-shadow:0 0 6px var(--rose)}
+.chip.w{color:var(--amber);border-color:rgb(251 191 36 / .3);
+        background:rgb(251 191 36 / .08)}
+.chip.w i{background:var(--amber);box-shadow:0 0 6px var(--amber)}
 
-/* 诊断条目 */
+/* 诊断流：左侧时间轴 */
+#out .flow{position:relative;padding-left:18px}
+#out .flow::before{
+  content:"";position:absolute;left:5px;top:6px;bottom:6px;width:1px;
+  background:linear-gradient(180deg,
+    rgb(255 255 255 / .03), rgb(255 255 255 / .16) 8%,
+    rgb(255 255 255 / .16) 92%, rgb(255 255 255 / .03));
+  pointer-events:none;
+}
+/* 每条诊断在时间轴上的节点 */
+#out .flow .diag::before{
+  content:"";position:absolute;
+  left:-15px;top:19px;
+  width:5px;height:5px;border-radius:50%;
+  background:var(--text-3);
+  box-shadow:0 0 0 3px rgb(11 14 20);
+}
+#out .flow .diag.err::before{
+  background:var(--rose);
+  box-shadow:0 0 0 3px rgb(11 14 20), 0 0 10px var(--rose);
+}
+#out .flow .diag.warn::before{
+  background:var(--amber);
+  box-shadow:0 0 0 3px rgb(11 14 20), 0 0 10px var(--amber);
+}
+/* 摘要卡在时间轴上不画节点 */
+#out .flow .summary{position:relative;z-index:1;margin-left:-8px}
+/* 诊断卡 */
 .diag{
-  display:flex;gap:0;
-  margin-bottom:9px;
-  background:var(--surface);
+  position:relative;
+  display:flex;
+  margin-bottom:10px;
+  background:linear-gradient(180deg,
+    rgb(255 255 255 / .028), rgb(255 255 255 / .012));
   border:1px solid var(--line);
-  border-radius:9px;
+  border-radius:var(--r-md);
   overflow:hidden;cursor:pointer;
-  transition:border-color .15s,background .15s,transform .1s;
+  transition:border-color .16s,background .16s,transform .12s,
+             box-shadow .16s;
 }
-.diag.enter{animation:rise .22s ease both}
+.diag.enter{animation:slide .26s cubic-bezier(.2,.9,.3,1) both}
 .diag:hover{
-  background:var(--surface-2);
-  border-color:var(--line-bright);
-  transform:translateX(2px);
+  border-color:rgb(255 255 255 / .2);
+  background:linear-gradient(180deg,
+    rgb(255 255 255 / .07), rgb(255 255 255 / .03));
+  transform:translateX(3px);
+  box-shadow:0 6px 24px rgb(0 0 0 / .3);
 }
-.diag:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.diag .bar{width:3px;flex-shrink:0;background:var(--text-3)}
-.diag.error .bar{background:var(--err)}
-.diag.warning .bar{background:var(--warn)}
-.diag .body{padding:11px 14px;flex:1;min-width:0}
-.diag .row1{
-  display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;
-  margin-bottom:2px;
+.diag:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+
+/* 左侧严重度光条 */
+.diag .edge{
+  width:3px;flex-shrink:0;position:relative;
 }
-.code-tag{
-  font:600 11px/1 var(--mono);
-  padding:3.5px 6px;border-radius:4px;
-  background:var(--surface-3);color:var(--text-2);
-  flex-shrink:0;letter-spacing:.02em;
+.diag .edge::after{
+  content:"";position:absolute;inset:0;
+  filter:blur(5px);opacity:.7;
 }
-.diag.error .code-tag{background:#3a1620;color:var(--err)}
-.diag.warning .code-tag{background:#3a2f12;color:var(--warn)}
-.loc{
-  font:11.5px/1 var(--mono);color:var(--text-3);
+.diag.err .edge{background:var(--rose)}
+.diag.err .edge::after{background:var(--rose)}
+.diag.warn .edge{background:var(--amber)}
+.diag.warn .edge::after{background:var(--amber)}
+
+.diag .content{padding:12px 15px;flex:1;min-width:0}
+.diag .top{
+  display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+  margin-bottom:5px;
+}
+.badge{
+  display:inline-flex;align-items:center;
+  padding:4px 8px;border-radius:6px;
+  font:700 10.5px/1 var(--mono);letter-spacing:.04em;
   flex-shrink:0;
 }
-.loc b{color:var(--accent);font-weight:500}
-.msg{flex:1;min-width:180px;font-size:13.5px;line-height:1.55}
-.hint{
-  margin-top:7px;padding-left:9px;
-  border-left:2px solid var(--line-bright);
-  font-size:12.5px;line-height:1.7;color:var(--text-2);
+.diag.err .badge{
+  background:rgb(251 113 133 / .14);
+  color:var(--rose);
+  border:1px solid rgb(251 113 133 / .28);
+}
+.diag.warn .badge{
+  background:rgb(251 191 36 / .14);
+  color:var(--amber);
+  border:1px solid rgb(251 191 36 / .28);
+}
+.where{
+  font:11.5px/1 var(--mono);color:var(--text-3);
+  display:inline-flex;align-items:center;gap:4px;
+  flex-shrink:0;
+}
+.where b{
+  color:var(--cyan);font-weight:600;
+  font-variant-numeric:tabular-nums;
+}
+.diag .what{
+  font-size:13.5px;line-height:1.6;
+  color:#e8edf5;
+  font-weight:400;
+  letter-spacing:.005em;
+}
+.diag .fix{
+  margin-top:9px;
+  padding:9px 12px;
+  border-radius:8px;
+  background:rgb(34 211 238 / .08);
+  border:1px solid rgb(34 211 238 / .14);
+  border-left:2px solid rgb(34 211 238 / .55);
+  font-size:12.5px;line-height:1.68;color:#cdd7e5;
+  display:flex;gap:9px;
+}
+.diag .fix .lbl{
+  font:600 10.5px/1.7 var(--mono);
+  color:var(--cyan);flex-shrink:0;
+  letter-spacing:.03em;
 }
 
 /* 预处理说明 */
 .notes{
-  margin-top:16px;padding:12px 14px;
-  background:var(--surface);
-  border:1px solid var(--line);border-radius:9px;
-  font-size:12.5px;color:var(--text-2);
+  margin-top:16px;padding:13px 15px;
+  background:rgb(255 255 255 / .022);
+  border:1px solid var(--line);
+  border-radius:var(--r-md);
 }
-.notes .t{
-  font-size:11px;font-weight:600;color:var(--text-3);
-  text-transform:uppercase;letter-spacing:.06em;
-  margin-bottom:8px;
+.notes .h{
+  display:flex;align-items:center;gap:7px;
+  font:600 10.5px/1 var(--sans);
+  color:var(--text-3);
+  text-transform:uppercase;letter-spacing:.08em;
+  margin-bottom:9px;
 }
-.notes .n{display:flex;gap:7px;padding:3px 0;line-height:1.6}
-.notes .n::before{content:"·";color:var(--accent);flex-shrink:0}
+.notes .h svg{
+  width:12px;height:12px;stroke:var(--text-3);fill:none;
+  stroke-width:2;stroke-linecap:round;
+}
+.notes .item{
+  display:flex;gap:8px;padding:3.5px 0;
+  font-size:12.5px;line-height:1.6;color:var(--text-2);
+}
+.notes .item::before{
+  content:"";width:4px;height:4px;border-radius:50%;
+  background:var(--text-3);flex-shrink:0;margin-top:8px;
+}
 
-/* IR 面板 */
+/* ── IR 面板 ── */
 #irpane{display:none;flex:1;overflow:auto;padding:16px}
 body.ir-mode #irpane{display:block}
 body.ir-mode #out{display:none}
 #ir{
-  font:12.5px/1.7 var(--mono);
-  color:#a8b6cc;white-space:pre;
-  tab-size:2;
+  font:12.5px/1.75 var(--mono);
+  color:#9fb0c6;white-space:pre;tab-size:2;
 }
-#ir .cmt{color:var(--text-3)}
-#ir .lbl{color:var(--accent)}
-#ir .kw{color:var(--warn)}
+#ir .c{color:#4d5a6e;font-style:italic}
+#ir .l{color:var(--cyan)}
+#ir .k{color:var(--amber)}
+#ir .n{color:var(--emerald)}
 
-/* 底栏 */
+/* ── 底栏 ── */
 footer{
-  position:relative;z-index:2;flex-shrink:0;
-  height:28px;display:flex;align-items:center;gap:16px;
-  padding:0 20px;
-  background:var(--surface);
-  border-top:1px solid var(--line);
+  position:relative;z-index:10;flex-shrink:0;
+  height:32px;display:flex;align-items:center;gap:18px;
+  padding:0 22px;
+  background:rgb(11 14 20 / .8);
+  backdrop-filter:blur(16px);
+  -webkit-backdrop-filter:blur(16px);
+  border-top:1px solid var(--line-2);
   font:11.5px/1 var(--mono);color:var(--text-3);
 }
-footer .sep{color:var(--line-bright)}
-footer .ok{color:var(--ok)}
-footer .bad{color:var(--err)}
-footer .right{margin-left:auto;display:flex;gap:16px}
+footer .st{display:inline-flex;align-items:center;gap:6px}
+footer .st i{
+  width:6px;height:6px;border-radius:50%;
+  background:var(--text-3);transition:background .2s,box-shadow .2s;
+}
+footer .st.busy i{background:var(--cyan);box-shadow:0 0 8px var(--cyan)}
+footer .st.ok i{background:var(--emerald);box-shadow:0 0 8px var(--emerald)}
+footer .st.bad i{background:var(--rose);box-shadow:0 0 8px var(--rose)}
+footer .div{color:var(--line-3)}
+footer .right{margin-left:auto;display:flex;gap:18px;align-items:center}
+footer b{color:var(--text-2);font-weight:600}
 
-@keyframes rise{
-  from{opacity:0;transform:translateY(4px)}
-  to{opacity:1;transform:translateY(0)}
+/* 动效 */
+@keyframes pop{
+  from{opacity:0;transform:scale(.97) translateY(4px)}
+  to{opacity:1;transform:scale(1) translateY(0)}
+}
+@keyframes slide{
+  from{opacity:0;transform:translateX(-6px)}
+  to{opacity:1;transform:translateX(0)}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
   #out{scroll-behavior:auto}
 }
-/* 窄屏：上下堆叠 */
-@media (max-width:900px){
-  main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
-  .pane+.pane{border-left:0;border-top:1px solid var(--line)}
-  .brand .sub{display:none}
+
+/* 窄屏 */
+@media (max-width:960px){
+  main{grid-template-columns:1fr;grid-template-rows:1fr 1fr;padding:10px;gap:10px}
+  .subtitle{display:none}
+  header{height:56px;padding:0 14px;gap:10px}
+  .btn span.lbl{display:none}
+  .btn{padding:0 11px}
 }
 </style>
 </head>
 <body>
 
+<!-- 背景层 -->
+<div class="bg">
+  <div class="beam"></div>
+  <div class="beam-2"></div>
+  <div class="mesh"></div>
+  <div class="cursor-light" id="clight"></div>
+  <div class="noise"></div>
+</div>
+
 <header>
   <div class="brand">
-    <div class="logo">c</div>
-    <h1>csub</h1>
-    <span class="sub">C 代码查错 · v1.0</span>
+    <div class="mark"><span>&lt;/&gt;</span></div>
+    <div class="title-wrap">
+      <div class="title">csub <em>诊断台</em></div>
+      <div class="subtitle">C SUBSET COMPILER · v1.0</div>
+    </div>
   </div>
   <div class="spacer"></div>
-  <button class="btn" id="btn-sample">示例代码</button>
-  <button class="btn" id="btn-ir">三地址码</button>
-  <button class="btn" id="btn-clear">清空</button>
+
+  <button class="btn" id="btn-sample" title="载入一段有 4 个典型问题的代码">
+    <svg viewBox="0 0 24 24"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></svg>
+    <span class="lbl">示例</span>
+  </button>
+  <button class="btn" id="btn-ir" title="查看三地址码中间表示">
+    <svg viewBox="0 0 24 24"><path d="M4 6h6M4 12h10M4 18h6"/><circle cx="18" cy="6" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+    <span class="lbl">三地址码</span>
+  </button>
+  <button class="btn" id="btn-clear" title="清空编辑器">
+    <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+    <span class="lbl">清空</span>
+  </button>
   <button class="btn primary" id="btn-check">
+    <svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>
     检查 <kbd>Ctrl ↵</kbd>
   </button>
 </header>
 
 <main>
+  <!-- 编辑器 -->
   <section class="pane">
     <div class="pane-head">
-      <span class="dot"></span>
-      <span>源代码</span>
-      <span class="right" id="stat"></span>
+      <span class="lamp on" id="lamp-src"></span>
+      <span class="name">源代码</span>
+      <div class="meta">
+        <span id="meta-lines">0 行</span>
+        <span class="sep">/</span>
+        <span id="meta-chars">0 字符</span>
+      </div>
     </div>
     <div class="editor">
       <div class="gutter" id="gutter">1</div>
-      <textarea id="code" spellcheck="false" autocomplete="off"
-        autocapitalize="off"
-        placeholder="在这里粘贴 C 代码&#10;&#10;或点右上角「示例代码」看它能查出什么"></textarea>
+      <div class="code-wrap">
+        <pre class="hl" id="hl" aria-hidden="true"></pre>
+        <textarea id="code" spellcheck="false" autocomplete="off"
+          autocapitalize="off" autofocus
+          placeholder="在此粘贴 C 代码&#10;&#10;支持 #include / 宏 / 结构体 / 指针 / 递归&#10;&#10;Ctrl + Enter  检查"></textarea>
+      </div>
     </div>
   </section>
 
+  <!-- 诊断 -->
   <section class="pane">
     <div class="pane-head">
-      <span class="dot muted" id="outdot"></span>
-      <span id="outtitle">诊断</span>
-      <span class="right" id="outstat"></span>
+      <span class="lamp" id="lamp-out"></span>
+      <span class="name" id="name-out">诊断</span>
+      <div class="meta" id="meta-out"></div>
     </div>
     <div id="out">
-      <div class="placeholder">
-        <div class="big">{ }</div>
-        <div class="tip">
-          粘贴代码后按 <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 检查<br>
-          诊断会带行号、严重级别和修改建议
+      <div class="empty">
+        <div class="glyph">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 9v4M12 17h.01"/>
+            <path d="M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>
+          </svg>
+        </div>
+        <h3>等待检查</h3>
+        <p>把代码贴进左边，按 <kbd>Ctrl</kbd>+<kbd>Enter</kbd>。<br>
+           每条诊断会带行号、严重级别和修改建议。</p>
+        <div class="caps">
+          <div class="cap"><i style="background:var(--rose)"></i>
+            类型混淆 · 未初始化 · scanf 漏 &amp;</div>
+          <div class="cap"><i style="background:var(--amber)"></i>
+            越界 · 死循环 · 漏 return · 冗余表达式</div>
+          <div class="cap dim"><i style="background:var(--text-3)"></i>
+            算法逻辑错、内存泄漏 → <b>查不到</b></div>
         </div>
       </div>
     </div>
@@ -484,100 +896,203 @@ footer .right{margin-left:auto;display:flex;gap:16px}
 </main>
 
 <footer>
-  <span id="f-status">就绪</span>
-  <span class="sep">|</span>
+  <span class="st" id="f-state"><i></i><span>就绪</span></span>
+  <span class="div">│</span>
   <span>39 条规则</span>
-  <span class="sep">|</span>
-  <span>零误报验证：42 份真实代码</span>
+  <span class="div">│</span>
+  <span>零误报验证 <b>42</b> 份真实代码</span>
   <div class="right">
-    <span id="f-lines">0 行</span>
-    <span id="f-errs">—</span>
+    <span id="f-count">—</span>
+    <span class="div">│</span>
+    <span id="f-size">0 行</span>
   </div>
 </footer>
 
 <script>
-const code    = document.getElementById('code');
-const gutter  = document.getElementById('gutter');
-const out     = document.getElementById('out');
-const irPre   = document.getElementById('ir');
-const stat    = document.getElementById('stat');
-const outstat = document.getElementById('outstat');
-const outdot  = document.getElementById('outdot');
-const outtitle= document.getElementById('outtitle');
-const fStatus = document.getElementById('f-status');
-const fLines  = document.getElementById('f-lines');
-const fErrs   = document.getElementById('f-errs');
+'use strict';
+const $ = id => document.getElementById(id);
+const code = $('code'), gutter = $('gutter'), out = $('out');
+const hl = $('hl');
+const irPre = $('ir'), irPane = $('irpane');
 
 const SAMPLE = `#include <stdio.h>
 
-/* 这段代码有 4 个典型问题，点「检查」看它能不能全查出来 */
+/* 这段代码埋了 4 个典型问题，点「检查」看能不能全查出来 */
 
 int main() {
-    int a[5];
-    int i, sum;
+    int  a[5];
+    int  i, sum;
 
-    /* 1. 循环越界：i 最大取 5，但 a[5] 不存在 */
+    /* ① 循环越界：i 最大取 5，但 a[5] 不存在 */
     for (i = 0; i <= 5; i++) {
         a[i] = i * 2;
     }
 
-    /* 2. 赋值当比较：sum 还没初始化 */
+    /* ② 赋值当比较：sum 还没初始化 */
     if (sum = 10) {
         printf("%d\\n", sum);
     }
 
-    /* 3. scanf 漏写 & */
+    /* ③ scanf 漏写 & */
     int n;
     scanf("%d", n);
 
-    /* 4. 用了未声明的变量 */
+    /* ④ 用了未声明的变量 */
     printf("%d\\n", undeclared);
 
     return 0;
 }
 `;
 
-/* ── 行号槽 ── */
+/* ═══ 状态 ═══ */
 let errLines = new Set(), warnLines = new Set();
+
+/* ═══ 语法高亮 ═══
+   透明 textarea 叠在 <pre class="hl"> 上。
+   只做 C 的主要元素：注释 / 字符串 / 预处理 / 关键字 / 类型 / 数字。
+   不做完美词法分析——够看就行，也不能拖慢输入。
+*/
+const KW = new Set(['if','else','while','for','return','break','continue',
+  'switch','case','default','do','goto','sizeof','struct','union','enum',
+  'typedef','static','const','extern','inline','volatile','restrict',
+  'signed','unsigned','_Bool','bool','true','false','NULL']);
+const TY = new Set(['int','char','void','float','double','long','short',
+  'size_t','FILE','struct','union','enum']);
+
+function hlLine(line) {
+  let out = '', i = 0, n = line.length;
+  while (i < n) {
+    const ch = line[i];
+
+    // 行注释
+    if (ch === '/' && line[i+1] === '/') {
+      out += `<span class="c">${esc(line.slice(i))}</span>`;
+      break;
+    }
+    // 块注释（单行内闭合；跨行的由逐行处理兜底）
+    if (ch === '/' && line[i+1] === '*') {
+      const e = line.indexOf('*/', i + 2);
+      if (e >= 0) {
+        out += `<span class="c">${esc(line.slice(i, e + 2))}</span>`;
+        i = e + 2; continue;
+      }
+      out += `<span class="c">${esc(line.slice(i))}</span>`;
+      break;
+    }
+    // 字符串 / 字符
+    if (ch === '"' || ch === "'") {
+      const q = ch; let j = i + 1;
+      while (j < n) {
+        if (line[j] === '\\') { j += 2; continue; }
+        if (line[j] === q) { j++; break; }
+        j++;
+      }
+      out += `<span class="s">${esc(line.slice(i, j))}</span>`;
+      i = j; continue;
+    }
+    // 预处理
+    if (ch === '#' && line.slice(0, i).trim() === '') {
+      out += `<span class="p">${esc(line.slice(i))}</span>`;
+      break;
+    }
+    // 标识符
+    if (/[A-Za-z_]/.test(ch)) {
+      let j = i;
+      while (j < n && /[A-Za-z0-9_]/.test(line[j])) j++;
+      const w = line.slice(i, j);
+      const cls = KW.has(w) ? 'k' : (TY.has(w) ? 't' : null);
+      // 函数调用：后面紧跟 (
+      const isCall = line[j] === '(';
+      if (cls) out += `<span class="${cls}">${esc(w)}</span>`;
+      else if (isCall) out += `<span class="f">${esc(w)}</span>`;
+      else out += esc(w);
+      i = j; continue;
+    }
+    // 数字
+    if (/[0-9]/.test(ch)) {
+      let j = i;
+      while (j < n && /[0-9a-fA-FxX.]/.test(line[j])) j++;
+      out += `<span class="n">${esc(line.slice(i, j))}</span>`;
+      i = j; continue;
+    }
+    out += esc(ch);
+    i++;
+  }
+  return out;
+}
+
+function renderHighlight() {
+  const lines = code.value.split('\n');
+  hl.innerHTML = lines.map(hlLine).join('\n');
+  hl.scrollTop = code.scrollTop;
+  hl.scrollLeft = code.scrollLeft;
+}
+
+/* ═══ 行号槽 ═══ */
 function renderGutter() {
   const n = Math.max(code.value.split('\n').length, 1);
-  const parts = [];
+  const buf = [];
   for (let i = 1; i <= n; i++) {
-    const cls = errLines.has(i) ? ' hi-e'
-              : (warnLines.has(i) ? ' hi' : '');
-    // 每个行号必须是块级元素：span 是 inline，拼 \n 不会换行，
-    // 所有行号会挤成一行（早期就踩过这个）。
-    parts.push(`<div class="gl${cls}">${i}</div>`);
+    const c = errLines.has(i) ? ' err'
+            : warnLines.has(i) ? ' warn' : '';
+    // 必须是块级元素：inline 元素的 \n 不换行
+    buf.push(`<div class="gl${c}">${i}</div>`);
   }
-  gutter.innerHTML = parts.join('');
-  gutter.scrollTop = code.scrollTop;
-}
-function refreshStat() {
-  const v = code.value;
-  const lines = v ? v.split('\n').length : 0;
-  stat.textContent = v ? `${lines} 行 · ${v.length} 字符` : '';
-  fLines.textContent = `${lines} 行`;
-}
-function syncScroll() {
+  gutter.innerHTML = buf.join('');
   gutter.scrollTop = code.scrollTop;
 }
 
+function refreshMeta() {
+  const v = code.value;
+  const lines = v ? v.split('\n').length : 0;
+  $('meta-lines').textContent = lines + ' 行';
+  $('meta-chars').textContent = v.length + ' 字符';
+  $('f-size').textContent = lines + ' 行';
+}
+
+function setState(cls, text) {
+  const el = $('f-state');
+  el.className = 'st ' + cls;
+  el.lastElementChild.textContent = text;
+}
+
+/* ═══ 事件 ═══ */
 code.addEventListener('input', () => {
   errLines.clear(); warnLines.clear();
-  renderGutter(); refreshStat();
+  renderGutter(); refreshMeta(); renderHighlight();
 });
-code.addEventListener('scroll', syncScroll);
+code.addEventListener('scroll', () => {
+  gutter.scrollTop = code.scrollTop;
+  hl.scrollTop = code.scrollTop;
+  hl.scrollLeft = code.scrollLeft;
+});
 code.addEventListener('keydown', e => {
   if (e.key === 'Tab') {
     e.preventDefault();
     const s = code.selectionStart, t = code.selectionEnd;
     code.value = code.value.slice(0, s) + '    ' + code.value.slice(t);
     code.selectionStart = code.selectionEnd = s + 4;
-    renderGutter(); refreshStat();
+    renderGutter(); refreshMeta(); renderHighlight();
   }
 });
 
-/* ── 请求 ── */
+/* 光标跟随光晕 */
+const clight = $('clight');
+let raf = null;
+window.addEventListener('mousemove', e => {
+  document.body.classList.add('has-cursor');
+  if (raf) return;
+  raf = requestAnimationFrame(() => {
+    clight.style.left = e.clientX + 'px';
+    clight.style.top = e.clientY + 'px';
+    raf = null;
+  });
+});
+window.addEventListener('mouseleave', () => {
+  document.body.classList.remove('has-cursor');
+});
+
+/* ═══ 请求 ═══ */
 async function post(path, body) {
   const r = await fetch(path, {
     method: 'POST',
@@ -591,23 +1106,27 @@ async function post(path, body) {
 async function runCheck() {
   const src = code.value;
   if (!src.trim()) {
-    out.innerHTML = `<div class="placeholder">
-      <div class="big">{ }</div>
-      <div class="tip">代码是空的</div></div>`;
-    fStatus.textContent = '就绪';
+    out.innerHTML = `<div class="empty">
+      <div class="glyph"><svg viewBox="0 0 24 24">
+        <path d="M12 9v4M12 17h.01"/>
+        <path d="M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>
+      </svg></div>
+      <h3>代码是空的</h3>
+      <p>先粘贴一些 C 代码再检查</p></div>`;
+    setState('', '就绪');
     return;
   }
-  fStatus.textContent = '检查中…';
-  outdot.classList.add('muted');
+  setState('busy', '检查中…');
   try {
-    const data = await post('/api/check', {code: src});
-    render(data);
+    render(await post('/api/check', {code: src}));
   } catch (e) {
     out.innerHTML = `<div class="summary bad">
-      <span class="verdict">请求失败</span>
-      <span class="counts"><span class="chip">${esc(e.message)}</span></span>
-    </div>`;
-    fStatus.textContent = '请求失败';
+      <div class="icon"><svg viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+      </svg></div>
+      <div class="text"><div class="big">请求失败</div>
+        <div class="small">${esc(e.message)}</div></div></div>`;
+    setState('bad', '请求失败');
   }
 }
 
@@ -616,11 +1135,13 @@ function esc(s) {
     {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
+/* ═══ 渲染 ═══ */
 function render(data) {
   const ds = data.diags || [];
   const nE = ds.filter(d => d.level === 'error').length;
   const nW = ds.filter(d => d.level === 'warning').length;
 
+  // 行号槽标记
   errLines.clear(); warnLines.clear();
   for (const d of ds) {
     if (d.line > 0) {
@@ -631,66 +1152,99 @@ function render(data) {
   renderGutter();
 
   let html = '';
+
   if (!ds.length) {
     html += `<div class="summary good">
-      <span class="verdict">没有发现问题</span>
-      <span class="counts"><span class="chip">0 条</span></span>
+      <div class="icon"><svg viewBox="0 0 24 24">
+        <path d="M20 6L9 17l-5-5"/></svg></div>
+      <div class="text">
+        <div class="big">没有发现问题</div>
+        <div class="small">这段代码通过了 39 条检查</div>
+      </div>
+      <div class="chips"><span class="chip">0 条</span></div>
     </div>`;
   } else {
     html += `<div class="summary ${nE ? 'bad' : 'good'}">
-      <span class="verdict">${nE ? '发现 ' + nE + ' 个错误' : '只有警告'}</span>
-      <span class="counts">
-        ${nE ? `<span class="chip e">${nE} 错误</span>` : ''}
-        ${nW ? `<span class="chip w">${nW} 警告</span>` : ''}
-      </span>
+      <div class="icon"><svg viewBox="0 0 24 24">
+        ${nE
+          ? '<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>'
+          : '<path d="M20 6L9 17l-5-5"/>'}
+      </svg></div>
+      <div class="text">
+        <div class="big">${nE ? '发现 ' + nE + ' 个错误' : '只有警告'}</div>
+        <div class="small">${nE
+          ? '这些问题通常会导致程序出错'
+          : '不影响编译，但建议检查'}</div>
+      </div>
+      <div class="chips">
+        ${nE ? `<span class="chip e"><i></i>${nE} 错误</span>` : ''}
+        ${nW ? `<span class="chip w"><i></i>${nW} 警告</span>` : ''}
+      </div>
     </div>`;
   }
 
   for (const d of ds) {
-    html += `<div class="diag ${d.level} enter" data-line="${d.line}"
-                  tabindex="0" role="button">
-      <div class="bar"></div>
-      <div class="body">
-        <div class="row1">
-          <span class="code-tag">${esc(d.code)}</span>
-          <span class="loc">第 <b>${d.line}</b> 行</span>
-          <span class="msg">${esc(d.msg)}</span>
+    const lv = d.level === 'error' ? 'err' : 'warn';
+    html += `<div class="diag ${lv} enter" data-line="${d.line}"
+                  tabindex="0" role="button"
+                  aria-label="${esc(d.code)} 第 ${d.line} 行: ${esc(d.msg)}">
+      <div class="edge"></div>
+      <div class="content">
+        <div class="top">
+          <span class="badge">${esc(d.code)}</span>
+          <span class="where">
+            <svg viewBox="0 0 24 24" width="11" height="11"
+                 fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 6h16M4 12h16M4 18h10"/>
+            </svg>
+            第 <b>${d.line}</b> 行
+          </span>
+          ${d.hint ? '' : ''}
         </div>
-        ${d.hint ? `<div class="hint">${esc(d.hint)}</div>` : ''}
+        <div class="what">${esc(d.msg)}</div>
+        ${d.hint ? `<div class="fix">
+          <span class="lbl">建议</span>
+          <span>${esc(d.hint)}</span>
+        </div>` : ''}
       </div>
     </div>`;
   }
 
   if (data.notes && data.notes.length) {
-    html += `<div class="notes"><div class="t">预处理说明</div>`;
+    html += `<div class="notes">
+      <div class="h">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/>
+          <path d="M12 16v-4M12 8h.01"/></svg>
+        预处理说明
+      </div>`;
     for (const n of data.notes)
-      html += `<div class="n"><span>${esc(n)}</span></div>`;
+      html += `<div class="item"><span>${esc(n)}</span></div>`;
     html += `</div>`;
   }
 
-  out.innerHTML = html;
+  out.innerHTML = `<div class="flow">${html}</div>`;
+
+  // 交互绑定 + 动画清理
   out.querySelectorAll('.diag').forEach(el => {
-    const go = () => jumpToLine(parseInt(el.dataset.line, 10));
+    const go = () => jumpTo(parseInt(el.dataset.line, 10));
     el.onclick = go;
     el.onkeydown = e => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
     };
-    // 动画跑完就摘掉 enter，避免后续交互受动画影响
-    el.addEventListener('animationend', () => el.classList.remove('enter'),
-                        {once: true});
+    el.addEventListener('animationend',
+      () => el.classList.remove('enter'), {once: true});
   });
 
-  outdot.classList.toggle('muted', ds.length === 0);
-  outstat.textContent = ds.length
-    ? `${ds.length} 条` : '';
-  fStatus.textContent = ds.length
-    ? (nE ? `${nE} 个错误` : '只有警告')
-    : '没有发现问题';
-  fErrs.textContent = ds.length ? `${nE}E / ${nW}W` : '0';
-  fErrs.className = nE ? 'bad' : (nW ? '' : 'ok');
+  const lampOut = $('lamp-out');
+  lampOut.className = 'lamp ' + (nE ? 'err' : (nW ? 'on' : 'on'));
+  $('meta-out').textContent = ds.length ? ds.length + ' 条' : '';
+  $('f-count').textContent = ds.length
+    ? `${nE} 错误 · ${nW} 警告` : '0 条';
+  setState(nE ? 'bad' : (nW ? '' : 'ok'),
+           ds.length ? `${ds.length} 条诊断` : '通过');
 }
 
-function jumpToLine(line) {
+function jumpTo(line) {
   if (!line || line < 1) return;
   const lines = code.value.split('\n');
   let pos = 0;
@@ -698,69 +1252,78 @@ function jumpToLine(line) {
     pos += lines[i].length + 1;
   code.focus();
   code.setSelectionRange(pos, pos + (lines[line - 1] || '').length);
-  const lh = 21.9;
-  code.scrollTop = Math.max(0, (line - 6) * lh);
-  syncScroll();
+  code.scrollTop = Math.max(0, (line - 7) * 22.2);
+  gutter.scrollTop = code.scrollTop;
 }
 
-/* ── IR ── */
+/* ═══ IR ═══ */
 async function showIr() {
   const src = code.value;
   if (!src.trim()) return;
   document.body.classList.add('ir-mode');
-  outtitle.textContent = '三地址码';
+  $('name-out').textContent = '三地址码';
   irPre.textContent = '生成中…';
   try {
     const data = await post('/api/ir', {code: src});
     irPre.innerHTML = colorIr(data.ir || '（空）');
-    fStatus.textContent = 'IR 已生成';
+    setState('ok', 'IR 已生成');
   } catch (e) {
     irPre.textContent = '生成失败：' + e.message;
   }
 }
+
 function colorIr(s) {
   return esc(s)
-    .replace(/^(;[^\n]*)$/gm, '<span class="cmt">$1</span>')
-    .replace(/^((?:func |L)\w+:?)/gm, '<span class="lbl">$1</span>');
+    .replace(/^(\s*;.*)$/gm, '<span class="c">$1</span>')
+    .replace(/\b(func\s+\w+|L\d+):/g, '<span class="l">$1:</span>')
+    .replace(/\b(return|call|goto|ifFalse|if)\b/g, '<span class="k">$1</span>');
 }
 
-/* ── 按钮 ── */
-document.getElementById('btn-check').onclick = () => {
+/* ═══ 按钮 ═══ */
+$('btn-check').onclick = () => {
   document.body.classList.remove('ir-mode');
-  outtitle.textContent = '诊断';
+  $('name-out').textContent = '诊断';
   runCheck();
 };
-document.getElementById('btn-ir').onclick = showIr;
-document.getElementById('btn-sample').onclick = () => {
+$('btn-ir').onclick = showIr;
+$('btn-sample').onclick = () => {
   code.value = SAMPLE;
   document.body.classList.remove('ir-mode');
-  outtitle.textContent = '诊断';
+  $('name-out').textContent = '诊断';
   errLines.clear(); warnLines.clear();
-  renderGutter(); refreshStat(); runCheck();
+  renderGutter(); refreshMeta(); renderHighlight();
+  runCheck();
 };
-document.getElementById('btn-clear').onclick = () => {
+$('btn-clear').onclick = () => {
   code.value = '';
   document.body.classList.remove('ir-mode');
-  outtitle.textContent = '诊断';
+  $('name-out').textContent = '诊断';
   errLines.clear(); warnLines.clear();
-  renderGutter(); refreshStat();
-  out.innerHTML = `<div class="placeholder">
-    <div class="big">{ }</div>
-    <div class="tip">已清空</div></div>`;
-  outstat.textContent = '';
-  fStatus.textContent = '就绪';
-  fErrs.textContent = '—';
-  fErrs.className = '';
+  renderGutter(); refreshMeta(); renderHighlight();
+  out.innerHTML = `<div class="empty">
+    <div class="glyph"><svg viewBox="0 0 24 24">
+      <path d="M12 9v4M12 17h.01"/>
+      <path d="M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>
+    </svg></div>
+    <h3>等待检查</h3>
+    <p>把代码贴进左边，按 <kbd>Ctrl</kbd>+<kbd>Enter</kbd>。</p></div>`;
+  $('meta-out').textContent = '';
+  $('f-count').textContent = '—';
+  $('lamp-out').className = 'lamp';
+  setState('', '就绪');
   code.focus();
 };
+
+/* 快捷键 */
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     e.preventDefault();
-    document.getElementById('btn-check').click();
+    $('btn-check').click();
   }
 });
 
-renderGutter(); refreshStat(); code.focus();
+/* 启动 */
+renderGutter(); refreshMeta(); renderHighlight(); code.focus();
 </script>
 </body>
 </html>
