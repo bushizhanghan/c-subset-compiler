@@ -22,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "src"))
+# tools/ 里的 codegen 供 /api/run 真实编译用
+sys.path.insert(0, os.path.join(HERE, "tools"))
 
 from lexer import tokenize, LexError          # noqa: E402
 from parser import parse, ParseError          # noqa: E402
@@ -106,6 +108,98 @@ def get_ir(raw):
         return ir_to_text(prog)
     except Exception as e:
         return "; 无法生成 IR：%s: %s" % (type(e).__name__, e)
+
+
+def run_code(raw, stdin_data, timeout=8):
+    """真实编译并运行：codegen -> gcc 汇编链接 -> 带输入执行。
+
+    返回 dict：
+      ok        程序是否跑完（编译失败/超时都是 False）
+      stage     semantic / codegen / build / run
+      stdout    程序输出
+      stderr    编译器/运行期错误
+      exit      退出码（跑完才有）
+      diags     语义检查结果（编译前先查一遍，有 ERROR 直接拒绝）
+    """
+    import subprocess
+    import tempfile
+    import shutil
+
+    # 1) 先跑语义检查：有 ERROR 就拒绝编译（和 csub.py 行为一致）
+    result = check_text(raw)
+    has_error = any(d["level"] == "error" for d in result["diags"])
+    if has_error:
+        return {"ok": False, "stage": "semantic", "stdout": "",
+                "stderr": "代码有错误，先修好再运行", "exit": None,
+                "diags": result["diags"]}
+
+    workdir = tempfile.mkdtemp(prefix="csubrun_")
+    try:
+        s_path = os.path.join(workdir, "prog.s")
+        exe_path = os.path.join(workdir, "prog.exe")
+
+        # 2) 生成汇编（直接用 compile_source 的文本接口，
+        #    免去临时 .c 文件和子进程开销）
+        try:
+            from codegen import compile_source, CodegenError
+        except ImportError:
+            from codegen import compile_source, CodegenError
+        try:
+            # compile_source 返回 (asm文本, 函数名列表)
+            asm_text, _funcs = compile_source(raw)
+        except CodegenError as e:
+            return {"ok": False, "stage": "codegen", "stdout": "",
+                    "stderr": str(e), "exit": None,
+                    "diags": result["diags"]}
+        except Exception as e:
+            return {"ok": False, "stage": "codegen", "stdout": "",
+                    "stderr": "代码生成失败：%s" % e, "exit": None,
+                    "diags": result["diags"]}
+        with open(s_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(asm_text)
+
+        # 3) 汇编链接（gcc 带 CRT）
+        r = subprocess.run(
+            ["gcc", "-O0", "-o", exe_path, s_path],
+            capture_output=True, timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode != 0:
+            msg = (r.stdout.decode("utf-8", "replace")
+                   + r.stderr.decode("utf-8", "replace")).strip()
+            return {"ok": False, "stage": "build", "stdout": "",
+                    "stderr": msg[-2000:] or "gcc 汇编/链接失败",
+                    "exit": None, "diags": result["diags"]}
+
+        # 4) 带输入运行，限时防死循环
+        try:
+            inp = stdin_data.encode("utf-8") if stdin_data else b""
+            r = subprocess.run([exe_path], input=inp,
+                               capture_output=True, timeout=timeout,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            out = r.stdout.decode("utf-8", "replace")
+            err = r.stderr.decode("utf-8", "replace")
+            code = r.returncode
+            # Windows 退出码按有符号解释（0xC0000005 -> 访问违例）
+            if code < 0:
+                code_u = code & 0xFFFFFFFF
+                if code_u == 0xC0000005:
+                    err += "\n[运行期] 访问违例（段错误）：越界/空指针"
+                elif code_u == 0xC0000094:
+                    err += "\n[运行期] 整数除零"
+                elif code_u == 0xC00000FD:
+                    err += "\n[运行期] 栈溢出（可能是无限递归）"
+                else:
+                    err += "\n[运行期] 异常退出，代码 0x%08X" % code_u
+            return {"ok": True, "stage": "run", "stdout": out,
+                    "stderr": err, "exit": code & 0xFF,
+                    "diags": result["diags"]}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "stage": "run",
+                    "stdout": "", "stderr":
+                    "运行超时（>%ds，可能是死循环）" % timeout,
+                    "exit": None, "diags": result["diags"]}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 PAGE = r'''<!DOCTYPE html>
@@ -872,7 +966,40 @@ textarea::-webkit-scrollbar-thumb,#out::-webkit-scrollbar-thumb,
 /* IR */
 #irpane{display:none;flex:1;overflow:auto;padding:16px}
 body.ir-mode #irpane{display:block}
+body.run-mode #irpane{display:block}
 body.ir-mode #out{display:none}
+body.run-mode #out{display:none}
+/* 运行结果面板 */
+.run-box{margin-bottom:14px;border-radius:11px;overflow:hidden;
+         border:1px solid var(--line)}
+.run-box .rb-head{
+  display:flex;align-items:center;gap:9px;padding:9px 13px;
+  font:600 11.5px/1 var(--mono);letter-spacing:.06em;
+  background:rgb(255 255 255 / .03);border-bottom:1px solid var(--line);
+  color:var(--text-2);text-transform:uppercase;
+}
+.run-box .rb-head .st-ok{color:#6ee7b7}
+.run-box .rb-head .st-bad{color:#fda4af}
+.run-box pre{
+  margin:0;padding:13px 15px;max-height:340px;overflow:auto;
+  font:12.5px/1.7 var(--mono);white-space:pre-wrap;word-break:break-all;
+}
+#run-stdout{color:#dbe7f5;background:rgb(16 19 32 / .5)}
+#run-stderr{color:#fda4af;background:rgb(60 20 28 / .25);
+            border-top:1px solid rgb(244 63 94 / .15)}
+#run-stdin-box{display:flex;flex-direction:column;gap:6px;margin-top:16px}
+#run-stdin-box .lbl{
+  font:600 10.5px/1 var(--mono);color:var(--text-3);
+  text-transform:uppercase;letter-spacing:.08em;
+}
+#run-stdin{
+  width:100%;min-height:64px;resize:vertical;
+  background:rgb(16 19 32 / .55);color:var(--text);
+  border:1px solid var(--line-2);border-radius:9px;
+  padding:10px 13px;outline:0;
+  font:12.5px/1.7 var(--mono);
+}
+#run-stdin:focus{border-color:rgb(34 211 238 / .5)}
 #ir{font:12.5px/1.75 var(--mono);color:#a9b8d4;white-space:pre;tab-size:2}
 #ir .c{color:#5a6884;font-style:italic}
 #ir .l{color:#c084fc;font-weight:600}
@@ -997,6 +1124,10 @@ footer b{
     <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
     <span class="lbl">清空</span>
   </button>
+  <button class="btn" id="btn-run" title="真实编译并运行（带输入输出）">
+    <svg viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></svg>
+    <span class="lbl">运行</span>
+  </button>
   <button class="btn primary" id="btn-check">
     <svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>
     检查 <kbd>Ctrl ↵</kbd>
@@ -1054,7 +1185,14 @@ footer b{
         </div>
       </div>
     </div>
-    <div id="irpane"><pre id="ir"></pre></div>
+    <div id="irpane">
+      <div id="run-stdin-box">
+        <span class="lbl">程序输入（stdin，scanf 从这里读）</span>
+        <textarea id="run-stdin" spellcheck="false"
+          placeholder="每行一个输入项，例如：&#10;3 5"></textarea>
+      </div>
+      <div id="run-out"></div>
+    </div>
   </section>
 </main>
 
@@ -1403,16 +1541,70 @@ async function showIr() {
   }
 }
 
+/* ═══ 真实编译运行 ═══ */
+async function runProgram() {
+  const src = code.value;
+  if (!src.trim()) { setState('', '代码是空的'); return; }
+  document.body.classList.remove('ir-mode');
+  document.body.classList.add('run-mode');
+  $('name-out').textContent = '运行结果';
+  const outBox = $('run-out');
+  outBox.innerHTML = `<div class="empty" style="height:auto;padding:30px">
+    <h3>编译运行中…</h3></div>`;
+  setState('busy', '编译运行中…');
+  const stdinData = $('run-stdin').value;
+  try {
+    const r = await post('/api/run', {code: src, stdin: stdinData});
+    // 先显示诊断（编译前的检查结果）
+    if (r.diags && r.diags.length) renderDiagsOnly(r.diags);
+    const cls = r.ok ? 'ok' : 'bad';
+    const stageTxt = {semantic: '语义检查未通过', codegen: '代码生成失败',
+                      build: '汇编/链接失败', run: '运行完成'}[r.stage] || r.stage;
+    let html = `<div class="run-box">
+      <div class="rb-head">
+        <span class="${r.ok ? 'st-ok' : 'st-bad'}">${r.ok ? '●' : '×'} ${stageTxt}</span>
+        <span style="margin-left:auto">${r.exit !== null && r.exit !== undefined
+          ? '退出码 ' + r.exit : ''}</span>
+      </div>
+      <pre id="run-stdout">${esc(r.stdout || '（无输出）')}</pre>` +
+      (r.stderr ? `<pre id="run-stderr">${esc(r.stderr)}</pre>` : '') +
+      `</div>`;
+    outBox.innerHTML = html;
+    setState(r.ok ? 'ok' : 'bad',
+             r.ok ? '运行完成' : stageTxt);
+  } catch (e) {
+    outBox.innerHTML = `<div class="run-box">
+      <div class="rb-head"><span class="st-bad">× 请求失败</span></div>
+      <pre id="run-stderr">${esc(e.message)}</pre></div>`;
+    setState('bad', '请求失败');
+  }
+}
+function renderDiagsOnly(ds) {
+  // 运行前把诊断也亮出来（不动主诊断面板）
+  const nE = ds.filter(d => d.level === 'error').length;
+  errLines.clear(); warnLines.clear();
+  for (const d of ds) {
+    if (d.line > 0) {
+      if (d.level === 'error') errLines.add(d.line);
+      else warnLines.add(d.line);
+    }
+  }
+  renderGutter();
+}
+
 /* ═══ 按钮 ═══ */
 $('btn-check').onclick = () => {
   document.body.classList.remove('ir-mode');
+  document.body.classList.remove('run-mode');
   $('name-out').textContent = '诊断';
   runCheck();
 };
 $('btn-ir').onclick = showIr;
+$('btn-run').onclick = runProgram;
 $('btn-sample').onclick = () => {
   code.value = SAMPLE;
   document.body.classList.remove('ir-mode');
+  document.body.classList.remove('run-mode');
   $('name-out').textContent = '诊断';
   errLines.clear(); warnLines.clear();
   renderGutter(); refreshMeta(); renderHighlight();
@@ -1421,6 +1613,7 @@ $('btn-sample').onclick = () => {
 $('btn-clear').onclick = () => {
   code.value = '';
   document.body.classList.remove('ir-mode');
+  document.body.classList.remove('run-mode');
   $('name-out').textContent = '诊断';
   errLines.clear(); warnLines.clear();
   renderGutter(); refreshMeta(); renderHighlight();
@@ -1500,6 +1693,9 @@ class Handler(BaseHTTPRequestHandler):
                 result = check_text(src)
             elif self.path == "/api/ir":
                 result = {"ir": get_ir(src)}
+            elif self.path == "/api/run":
+                stdin_data = payload.get("stdin") or ""
+                result = run_code(src, stdin_data)
             else:
                 self._send(404, json.dumps({"ok": False}),
                            "application/json; charset=utf-8")

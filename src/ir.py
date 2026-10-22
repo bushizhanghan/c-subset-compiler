@@ -63,6 +63,9 @@ class Instr:
             return f"{self.extra}[{self.a1}] = {self.a2}"
         if self.op == "addr":
             return f"{self.dst} = &{self.a1}"
+        if self.op == "addrof":
+            # 数组元素地址：&base[idx]
+            return f"{self.dst} = &{self.a1}[{self.a2}]"
         if self.op == "deref":
             return f"{self.dst} = *{self.a1}"
         if self.op == "param":
@@ -79,11 +82,36 @@ COMPOUND_ASSIGN = {
 }
 
 
+def _is_char_array(vtype):
+    """这个类型是不是 char 数组（可被字符串字面量初始化）。"""
+    if vtype is None:
+        return False
+    base = (getattr(vtype, "base", "") or "").replace("struct ", "")
+    if base != "char":
+        return False
+    return bool(getattr(vtype, "dims", None)) or \
+        getattr(vtype, "array", None) is not None
+
+
+def _array_total(vtype):
+    """数组元素总数（所有维度乘积）。"""
+    dims = getattr(vtype, "dims", None) or []
+    if dims:
+        n = 1
+        for d in dims:
+            n *= int(d)
+        return n
+    a = getattr(vtype, "array", None)
+    return int(a) if a else 0
+
+
 class IRGen:
     def __init__(self):
         self.code: list[Instr] = []
         self.tmp = 0
         self.label = 0
+        # 数组维度表：name -> [d0, d1, ...]，用于嵌套下标拍平
+        self.dims: dict = {}
         # 循环上下文栈：(continue 目标, break 目标)。
         # break/continue 必须知道自己该跳到哪一层——
         # 早期版本直接忽略它们，生成的 IR 语义是错的
@@ -273,6 +301,10 @@ class IRGen:
         self.loop_stack.pop()
         self.emit("label", extra=lend)
     def gen_vardecl(self, vd: VarDecl):
+        # 记录数组维度，供嵌套下标拍平用
+        dims = getattr(vd.vtype, "dims", None) or getattr(vd.vtype, "array", None)
+        if dims and len(dims) > 1:
+            self.dims[vd.name] = list(dims)
         # 初始化列表：int a[3] = {1,2,3};
         # 必须逐元素 store 到数组里，且 store 的目标要带上数组名。
         # 早期版本走通用路径，InitList 落到兜底 return "?"，
@@ -283,11 +315,57 @@ class IRGen:
                 self.emit("store", a1=str(idx), a2=v, extra=vd.name,
                           line=vd.line)
             return
+        # char s[6] = "hello"; 字符串初始化字符数组。
+        # 早期走通用路径生成 `s = "hello"`（把字符串当值赋给数组名），
+        # codegen 不认识，报"字符串字面量不支持"（实测全挂）。
+        # 正确语义：逐字节写入 + 结尾补 \0。
+        if isinstance(vd.init, Str) and _is_char_array(vd.vtype):
+            text = vd.init.value
+            for idx, ch in enumerate(text):
+                if idx >= _array_total(vd.vtype) - 1:
+                    break                   # 留 1 字节给 \0
+                self.emit("store", a1=str(idx), a2=str(ord(ch)),
+                          extra=vd.name, line=vd.line)
+            end = min(len(text), _array_total(vd.vtype) - 1)
+            self.emit("store", a1=str(end), a2="0", extra=vd.name,
+                      line=vd.line)
+            return
         if vd.init is not None:
             v = self.gen_expr(vd.init)
             self.emit("=", dst=vd.name, a1=v, line=vd.line)
 
     # ---- 表达式 ----
+
+    def _flatten_index(self, e):
+        """把 a[i][j] 拍平成 a[i*d1+j]。
+
+        返回 (base_name, flat_idx) 或 None。
+        早期嵌套下标直接 gen_expr(base) 得到值再 store，
+        导致"对非数组做下标写"（实测二维数组、矩阵转置全挂）。
+        """
+        indices = []
+        node = e
+        while isinstance(node, Index):
+            indices.append(node.idx)
+            node = node.base
+        if not isinstance(node, Ident):
+            return None
+        base_name = node.name
+        indices.reverse()
+        dims = self.dims.get(base_name)
+        if not dims or len(dims) != len(indices):
+            return None
+        # flat = ((i0 * d1 + i1) * d2 + i2 ...)
+        flat = self.gen_expr(indices[0])
+        for k in range(1, len(indices)):
+            t1 = self.newtmp()
+            self.emit("*", dst=t1, a1=flat, a2=str(dims[k]), line=e.line)
+            t2 = self.newtmp()
+            self.emit("+", dst=t2, a1=t1,
+                      a2=self.gen_expr(indices[k]), line=e.line)
+            flat = t2
+        return base_name, flat
+
     def gen_expr(self, e) -> str:
         if isinstance(e, Num):
             return repr(e.value) if e.is_float else str(e.value)
@@ -299,6 +377,36 @@ class IRGen:
             return e.name
 
         if isinstance(e, BinOp):
+            # && 和 || 必须短路：左边为假/真时右边一个字节都不能执行。
+            # 早期两边无条件求值，`a!=0 && 10/a>1` 在 a=0 时除零崩溃
+            # —— gcc 的语义是右边根本不求值（实测对照）。
+            if e.op in ("&&", "||"):
+                l = self.gen_expr(e.left)
+                t = self.newtmp()
+                res = self.newtmp()
+                lfail = self.newlabel()
+                ldone = self.newlabel()
+                if e.op == "&&":
+                    # 左为假 -> 直接出 0，跳过右边
+                    self.emit("if", a1=l, extra=lfail, line=e.line)
+                    r = self.gen_expr(e.right)
+                    self.emit("=", dst=res, a1=r, line=e.line)
+                    self.emit("goto", extra=ldone, line=e.line)
+                    self.emit("label", extra=lfail, line=e.line)
+                    self.emit("=", dst=res, a1="0", line=e.line)
+                    self.emit("label", extra=ldone, line=e.line)
+                else:
+                    # || 左为真 -> 直接出 1
+                    lok = self.newlabel()
+                    self.emit("if", a1=l, extra=lok, line=e.line)
+                    r = self.gen_expr(e.right)
+                    self.emit("=", dst=res, a1=r, line=e.line)
+                    self.emit("goto", extra=ldone, line=e.line)
+                    self.emit("label", extra=lok, line=e.line)
+                    self.emit("=", dst=res, a1="1", line=e.line)
+                    self.emit("label", extra=ldone, line=e.line)
+                self.emit("=", dst=t, a1=res, line=e.line)
+                return t
             l = self.gen_expr(e.left)
             r = self.gen_expr(e.right)
             t = self.newtmp()
@@ -319,6 +427,14 @@ class IRGen:
                 else:
                     tgt = None
                 cur = self.gen_expr(operand)
+                # 后缀运算必须**先**把旧值存进临时量，再改目标。
+                # 早期代码把 told=cur 放在了写回之后，于是
+                #   int b = a++;   ->  b 拿到的是自增后的值
+                # 实测 a=5 时 b 得到 6（应为 5）。
+                told = None
+                if is_post:
+                    told = self.newtmp()
+                    self.emit("=", dst=told, a1=cur, line=e.line)
                 t = self.newtmp()
                 self.emit("-" if is_dec else "+", dst=t, a1=cur, a2="1",
                           line=e.line)
@@ -327,15 +443,8 @@ class IRGen:
                 elif isinstance(operand, UnOp) and operand.op == "*":
                     p = self.gen_expr(operand.operand)
                     self.emit("store", a1="0", a2=t, extra=p, line=e.line)
-                # 表达式值：前缀返回新值；后缀必须返回**加之前的旧值**。
-                # 注意不能直接把 cur 这个符号名当结果——它已被改写。
-                # 必须先落一个临时变量保存旧值，否则 `int b = a++;`
-                # 会生成 `b = a`（此时 a 已加过），b 拿到的是 6 而非 5。
+                # 表达式值：前缀返回新值；后缀返回先前存好的旧值。
                 if is_post:
-                    told = self.newtmp()
-                    self.emit("=", dst=told, a1=cur, line=e.line)
-                    # 这两条必须在写回之前，这里靠 gen_expr 的调用顺序
-                    # 已经先生成了 told = cur，再生成自增，顺序正确。
                     return told
                 return t
 
@@ -348,6 +457,26 @@ class IRGen:
                 if isinstance(sz, int) and sz > 0:
                     return str(sz)
                 return "4"
+            # &a[i]：直接算地址，不能先 load 再取临时槽的地址。
+            # 早期统一走 gen_expr(operand)，生成的 IR 是
+            #   load t = a[i]   <- 白读一次
+            #   addr u = &t     <- 取的是临时变量地址，错
+            # 于是 scanf("%d", &a[i]) 写进临时槽，数组根本没被改
+            # （实测数组输入全读成垃圾值）。
+            if e.op == "&" and isinstance(e.operand, Index):
+                # 多维数组取址：&a[i][j] -> &a[i*d1+j]
+                flat = self._flatten_index(e.operand)
+                if flat is not None:
+                    base_name, idx = flat
+                    t = self.newtmp()
+                    self.emit("addrof", dst=t, a1=base_name, a2=idx,
+                              line=e.line)
+                    return t
+                base = self.gen_expr(e.operand.base)
+                idx = self.gen_expr(e.operand.idx)
+                t = self.newtmp()
+                self.emit("addrof", dst=t, a1=base, a2=idx, line=e.line)
+                return t
             v = self.gen_expr(e.operand)
             t = self.newtmp()
             if e.op == "-":
@@ -359,6 +488,28 @@ class IRGen:
                     pass
             elif e.op == "!":
                 self.emit("not", dst=t, a1=v, line=e.line)
+            elif e.op == "bnot":
+                self.emit("bnot", dst=t, a1=v, line=e.line)
+            elif e.op == "cast":
+                # 显式类型转换：(float)i / (int)f / (char)x ...
+                # 早期这里没有分支，cast 落到 else 变成恒等赋值，
+                # 于是 (float)7 直接把整数位 7 当浮点存 —— 输出 0.0。
+                ct = getattr(e, "cast_type", None)
+                cbase = (ct.base or "") if ct is not None else ""
+                if cbase in ("float", "double"):
+                    self.emit("itof", dst=t, a1=v, line=e.line)
+                elif cbase in ("int", "char", "long", "short"):
+                    self.emit("ftoi", dst=t, a1=v, line=e.line)
+                else:
+                    self.emit("=", dst=t, a1=v, line=e.line)
+            elif e.op == "~":
+                # 按位取反。早期没有这条分支，~x 直接落到 else
+                # 变成 `t = x`（恒等），实测 printf("%d",~5) 输出 5
+                # 而不是 -6。
+                self.emit("bnot", dst=t, a1=v, line=e.line)
+            elif e.op == "+":
+                # 一元正号：无操作，但要留个临时量保证类型一致
+                self.emit("=", dst=t, a1=v, line=e.line)
             elif e.op == "*":
                 self.emit("deref", dst=t, a1=v, line=e.line)
             elif e.op == "&":
@@ -386,6 +537,13 @@ class IRGen:
                 self.emit("=", dst=e.target.name, a1=v, line=e.line)
                 return e.target.name
             if isinstance(e.target, Index):
+                # 多维数组 a[i][j] = v：拍平成 a[i*d1+j] 再 store
+                flat = self._flatten_index(e.target)
+                if flat is not None:
+                    base_name, idx = flat
+                    self.emit("store", a1=idx, a2=v, extra=base_name,
+                              line=e.line)
+                    return v
                 base = self.gen_expr(e.target.base)
                 idx = self.gen_expr(e.target.idx)
                 self.emit("store", a1=idx, a2=v, extra=base, line=e.line)
@@ -416,11 +574,19 @@ class IRGen:
             return t
 
         if isinstance(e, Index):
+            # 多维数组 a[i][j]：拍平成 a[i*d1+j] 再 load
+            flat = self._flatten_index(e)
+            if flat is not None:
+                base_name, idx = flat
+                t = self.newtmp()
+                self.emit("load", dst=t, a1=base_name, a2=idx, line=e.line)
+                return t
             base = self.gen_expr(e.base)
             idx = self.gen_expr(e.idx)
             t = self.newtmp()
             self.emit("load", dst=t, a1=base, a2=idx, line=e.line)
             return t
+
 
         if isinstance(e, Member):
             # 结构体成员读取：p.x / q->x

@@ -47,6 +47,15 @@ ARG_REGS = ["ecx", "edx", "r8d", "r9d"]
 ARG_REGS64 = ["rcx", "rdx", "r8", "r9"]
 MAX_REG_ARGS = len(ARG_REGS)
 
+# 变参函数：Windows x64 ABI 要求调用前 al 记录"用了几个 xmm 寄存器"。
+# 我们把 double 实参走整数寄存器（gcc -O0 就是这么干的），
+# 所以 al 一律置 0。不置的话 printf 读到的浮点参数是垃圾。
+VARARG_FUNCS = frozenset({
+    "printf", "fprintf", "sprintf", "snprintf",
+    "scanf", "fscanf", "sscanf",
+    "vprintf", "vfprintf", "vsprintf", "vsnprintf",
+})
+
 # 返回指针的库函数。detect_pointers 靠它把 `t1 = call malloc(4)`
 # 的 t1 也标成指针，否则接返回值时 mov eax 只搬低 32 位，
 # 堆地址高位丢失 → 野指针 → 0xC0000005（实测）。
@@ -239,6 +248,19 @@ def collect_structs(prog):
                 if tag:
                     table, total = layout(d)
                     structs[tag] = {"members": table, "size": total}
+                # 匿名结构体的 typedef：typedef struct { int r; } Pos;
+                # 没有 tag，成员布局只能挂在别名上。
+                # 早期只登记 tag，于是 Pos p; p.r=1 报
+                # "找不到结构体布局"（实测 typedef 结构体全挂）。
+                for alias, ty in (getattr(d, "typedefs", None) or []):
+                    if getattr(ty, "ptr", 0):
+                        continue            # 指针别名不是结构体本身
+                    table, total = layout(d)
+                    structs[alias] = {"members": table, "size": total}
+                    if tag:
+                        structs.setdefault("struct " + tag,
+                                           {"members": table,
+                                            "size": total})
             elif isinstance(d, DeclGroup):
                 walk_decls(d.decls)
 
@@ -291,9 +313,19 @@ def _is_array(ty):
 
 
 def _array_len(ty):
+    """数组元素总数 = 所有维度的乘积。
+
+    早期只返回 dims[0]，int a[2][3] 被当成只有 2 个元素，
+    栈槽只分配 8 字节（2×4），但扁平索引会写到 a[0..5] 共 24 字节
+    —— 后 4 个元素直接踩进相邻临时量的槽位（实测矩阵转置输出
+    0 3 1 3 5 5，a[4] 的值被 t5 覆盖、a[2] 被 t6 覆盖）。
+    """
     dims = getattr(ty, "dims", None)
     if dims:
-        return int(dims[0])
+        n = 1
+        for d in dims:
+            n *= int(d)
+        return n
     a = getattr(ty, "array", None)
     return int(a) if a else 0
 
@@ -593,6 +625,9 @@ class FuncGen:
         self.line("push rbp")
         self.line("mov rbp, rsp")
         self.line(f"sub rsp, {self.frame}")
+        # 注意：局部帧清零必须放在参数保存之后——
+        # 清零用的 eax/ecx/rdi 正是 Win64 参数寄存器，
+        # 先清零会把进参全部冲掉（实测所有带参函数直接算错）。
 
         params = self.param_names()
         # 前 4 个走寄存器，第 5 个起在栈上。位置 = [rbp+48+8*(i-4)]：
@@ -601,10 +636,14 @@ class FuncGen:
         #   [rbp+16] 影子空间起点，[rbp+16, rbp+48) 共 32 字节
         #   [rbp+48] 第 5 个参数（Win64 ABI，实测）
         for i, p in enumerate(params):
-            if self.kinds[p] == "array":
-                raise CodegenError(
-                    f"函数 {self.name}: 参数 {p} 是数组 —— 数组参数退化为"
-                    f"指针的语义未实现")
+            # C 的数组形参本来就会退化成指针：int sum(int a[], int n)
+            # 里 a 就是 int*。早期这里直接报"数组参数未实现"，
+            # 于是最基本的数组传参函数全部没法编译（实测
+            # 冒泡排序/求和这类作业一律失败）。
+            # 处理办法：当指针看，槽位存 64 位地址。
+            is_arr_param = self.kinds[p] == "array"
+            if is_arr_param:
+                self.kinds[p] = "ptr"
             off = self.slot(p)
             if i < MAX_REG_ARGS:
                 self.comment(f"参数 {p} <- {ARG_REGS[i]}")
@@ -619,6 +658,11 @@ class FuncGen:
                 self.comment(f"参数 {p} <- [rbp+{src}] (stack)")
                 self.line(f"mov eax, DWORD PTR [rbp+{src}]")
                 self.line(f"mov DWORD PTR [rbp-{off}], eax")
+
+        # 注意：不做全帧清零。清零用的 eax/ecx/rdi 是参数寄存器，
+        # 且清零范围覆盖参数槽位本身，会把刚保存的进参冲掉
+        # （实测所有带参函数返回 0）。char 槽位的垃圾字节问题
+        # 在 addr 指令里按需清零解决。
 
         for ins in self.instrs:
             self.gen_instr(ins)
@@ -667,8 +711,28 @@ class FuncGen:
         # 早期把这个判断放在 "=" 之后，导致 `float x = 1.5` 先走了
         # 整数路径，1.5 被当成变量名去查槽位，报"未知变量 '1.5'"。
         if self._is_float_expr(ins):
-            self.gen_float_instr(ins)
-            return
+            # 内存/取址操作即使涉及 float 变量也不是"浮点运算"：
+            # &f 只是算地址，不走 xmm。早期一律送进 gen_float_instr，
+            # 那里不认识 addr，直接报"浮点指令 'addr' 后端不支持"
+            # （实测 scanf("%f",&f) 全挂）。
+            if op not in ("addr", "load", "store", "deref", "call",
+                          "getmem", "setmem", "addrof", "if", "ifTrue"):
+                # 特例：把 float 赋给 int 变量，必须先转成整数再存。
+                # 直接走浮点路径会把 32 位浮点位模式原样写进 int 槽
+                # （实测 `int r = (int)(1.5f+2.5f)` 输出 1082130432，
+                # 那正是 4.0f 的 IEEE 位模式）。
+                if op == "=" and ins.dst and self._dst_is_int(ins.dst) \
+                        and self._operand_is_float(ins.a1):
+                    self.load_float("xmm0", ins.a1)
+                    self.line("cvttss2si eax, xmm0")   # 截断，和 C 一致
+                    self.store_reg(ins.dst)
+                    return
+                # ftoi/itof 自己知道怎么转，不能被浮点路径吞掉
+                if op in ("ftoi", "itof"):
+                    pass                    # 落到下面按普通指令处理
+                else:
+                    self.gen_float_instr(ins)
+                    return
 
         if op == "=":
             self.load_operand("eax", ins.a1)
@@ -750,6 +814,32 @@ class FuncGen:
             self.store_reg(ins.dst)
             return
 
+        if op == "bnot":
+            # 按位取反：~x 等价于 x XOR -1
+            self.load_operand("eax", ins.a1)
+            self.line("not eax")
+            self.store_reg(ins.dst)
+            return
+
+        if op == "itof":
+            # 整数 -> float：(float)i。必须 cvtsi2ss，
+            # 直接把整数位当浮点存会得到 0.0（实测）。
+            self.load_operand("eax", ins.a1)
+            self.line("cvtsi2ss xmm0, eax")
+            self.store_float(ins.dst, "xmm0")
+            if ins.dst:
+                self.float_tmps.add(ins.dst)
+            return
+
+        if op == "ftoi":
+            # float -> int：(int)f。C 用截断，不是四舍五入。
+            self.load_float("xmm0", ins.a1)
+            self.line("cvttss2si eax, xmm0")
+            self.store_reg(ins.dst)
+            if ins.dst:
+                self.float_tmps.discard(ins.dst)
+            return
+
         if op == "call":
             self.gen_call(ins)
             return
@@ -770,9 +860,23 @@ class FuncGen:
 
         if op == "addr":
             off = self.slot(ins.a1)
+            # char 标量取地址前先清掉槽位：scanf("%c",&c) 只写
+            # 1 字节，槽位其余 3 字节是栈残留，后续按 int 读/比较
+            # 全是垃圾（实测 scanf("%c",&op) 后 op==43 判 false）。
+            # 只清这一格，不动别的变量——全帧清零会冲掉已保存的
+            # 参数（实测所有带参函数算错）。
+            ty = self.types.get(ins.a1)
+            if ty is not None and (ty.base or "") == "char" \
+                    and getattr(ty, "ptr", 0) == 0 \
+                    and not getattr(ty, "dims", None):
+                self.line(f"mov DWORD PTR [rbp-{off}], 0")
             # 数组名取首地址；标量取槽地址
             self.line(f"lea rax, [rbp-{off}]")
             self.store_reg(ins.dst)
+            return
+
+        if op == "addrof":
+            self.gen_addrof(ins)
             return
 
         if op == "deref":
@@ -899,8 +1003,22 @@ class FuncGen:
                 # 必须用 64 位寄存器。用 ecx 装地址会截断高位
                 # （实测堆/栈地址高位非零，一截就是野指针）。
                 self.load_operand(ARG_REGS64[i], a)
+            elif self._operand_is_float(a):
+                # 浮点实参：C 的默认实参提升把 float 变 double，
+                # 然后按 64 位值走整数寄存器（gcc -O0 实测就是
+                # cvtss2sd + movq xmm→rdx，不是走 xmm 寄存器）。
+                # 早期直接 load_operand("edx", a) 把 32 位浮点
+                # 位模式当 int 传过去 —— printf("%.1f") 打出 0.0。
+                self.load_float("xmm0", a)
+                self.line("cvtss2sd xmm0, xmm0")     # float -> double
+                self.line(f"movq {ARG_REGS64[i]}, xmm0")
             else:
                 self.load_operand(ARG_REGS[i], a)
+
+        # 变参调用（printf 家族）必须把 al 置成"用了几个 xmm 寄存器"。
+        # 我们走的是整数寄存器传 double，所以是 0。
+        if target in VARARG_FUNCS:
+            self.line("xor eax, eax")
 
         self.line(f"call {target}")
         if ins.dst:
@@ -925,6 +1043,22 @@ class FuncGen:
         if ty is not None and (ty.base or "") in ("float", "double"):
             return True
         return s in self.float_tmps
+
+    def _dst_is_int(self, name):
+        """赋值目标是不是整数类型变量。
+
+        用来判断 `int r = float_expr` 这种需要 cvttss2si 的场景。
+        临时量（t1/t2）不查——它们的类型由产生它的指令决定。
+        """
+        ty = self.types.get(name)
+        if ty is None:
+            return False                    # 临时量/未知：不插手
+        base = (ty.base or "").replace("struct ", "")
+        if base in ("float", "double"):
+            return False
+        if ty.ptr > 0:
+            return False                    # 指针另算
+        return True
 
     def _is_float_expr(self, ins):
         """这条指令是不是浮点运算（按 C 的算术提升规则）。"""
@@ -970,7 +1104,19 @@ class FuncGen:
             self.load_float("xmm0", ins.a1)
             self.load_float("xmm1", ins.a2)
             self.line("comiss xmm0, xmm1")
-            cc = SETCC.get(op)
+            # ucomiss/comiss 设置的是 CF/ZF/PF，不是 SF/OF。
+            # 浮点比较必须用无符号的条件码：
+            #   xmm0 <  xmm1  ->  CF=1        -> setb
+            #   xmm0 >  xmm1  ->  CF=0 且 ZF=0 -> seta
+            #   xmm0 <= xmm1  ->  CF=1 或 ZF=1 -> setbe
+            #   xmm0 >= xmm1  ->  CF=0        -> setae
+            #   ==  -> set  e ；!= -> setne
+            # 早期直接复用整数的 SETCC（setl/setg），那是看 SF≠OF 的，
+            # 浮点里 SF/OF 恒为 0，于是 a<b 永远算出 0
+            # （实测 1.5f < 2.5f 判成 false，printf 不输出）。
+            FSETCC = {"<": "b", ">": "a", "<=": "be", ">=": "ae",
+                      "==": "e", "!=": "ne"}
+            cc = FSETCC.get(op)
             if cc is None:
                 raise CodegenError(
                     f"函数 {self.name}: 浮点比较 '{op}' 不支持")
@@ -1175,6 +1321,40 @@ class FuncGen:
             self.load_operand("ecx", "rdx" if False else idx)
             self.line(f"{load_ins} [rdx+rcx*{esz}]")
         self.store_reg(ins.dst)
+
+    def gen_addrof(self, ins):
+        """&base[idx]：算元素地址，不读值。
+
+        和 gen_load 的区别只有最后一步——不 load，直接把
+        lea 算出来的地址当结果。早期 &a[i] 走的是"先 load 再
+        取临时槽地址"，于是 scanf("%d",&a[i]) 写进临时槽，
+        数组根本没变（实测数组输入全读成垃圾值）。
+        """
+        base, idx = ins.a1, ins.a2
+        if not _is_name(base):
+            raise CodegenError(
+                f"函数 {self.name}: addrof 的基址 '{base}' 无法识别")
+        if self.kinds.get(base) not in ("array", "ptr"):
+            raise CodegenError(
+                f"函数 {self.name}: 对非数组/非指针 '{base}' 取元素地址")
+        ty = self.types.get(base)
+        esz = self._elem_stride(ty) if ty is not None else 4
+
+        self.lea_base("rdx", base)
+        if _is_int_literal(idx):
+            self.line(f"lea rax, [rdx+{int(idx) * esz}]")
+        else:
+            self.load_operand("ecx", idx)
+            self.line(f"lea rax, [rdx+rcx*{esz}]")
+
+        off = self.slot(ins.dst)
+        self.line(f"mov QWORD PTR [rbp-{off}], rax")
+        self.ptr_names.add(ins.dst)
+        # 记住它指向什么类型，后续 deref 才知道读几个字节
+        elem = _elem_type_of(ty) if ty is not None else None
+        lay, _ = self._struct_layout_of_type(elem)
+        if lay is not None:
+            self.struct_ptr_of[ins.dst] = lay
 
     def _elem_stride(self, ty):
         """数组/指针的步长 = 元素大小。结构体元素要按布局算。"""

@@ -24,9 +24,16 @@ import sys
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
-def run(cmd, timeout=60):
-    """跑一条命令，返回 (returncode, stdout, stderr)，全部解码为文本。"""
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+def run(cmd, timeout=60, stdin_data=None):
+    """跑一条命令，返回 (returncode, stdout, stderr)，全部解码为文本。
+
+    stdin_data：要喂给程序的输入文本。
+    早期这里没接 stdin，子进程的输入是空的，
+    scanf 读到的是未初始化值（实测 scanf("%d",&a) 输出 444594288）。
+    接入真实编译就必须能把测试输入传进去。
+    """
+    inp = stdin_data.encode("utf-8") if stdin_data is not None else None
+    r = subprocess.run(cmd, input=inp, capture_output=True, timeout=timeout,
                        creationflags=CREATE_NO_WINDOW)
     return (r.returncode,
             r.stdout.decode("utf-8", "replace"),
@@ -56,14 +63,15 @@ def assemble(s_path, exe_path, cflags=("-O0",), timeout=120):
     return rc == 0, msg
 
 
-def execute(exe_path, timeout=30):
+def execute(exe_path, timeout=30, stdin_data=None):
     """跑可执行文件，返回 (退出码 或 None, 说明)。
 
-    程序的 stdout 原样转发——支持 printf/puts/putchar 之后，
-    看不到输出就没法验证 IO 是否正确。退出码仍由 main() 单独打印一行。
+    stdin_data：喂给程序的输入（scanf 等从这里读）。
+    stdout 原样转发——支持 printf 之后看不到输出就没法验证 IO。
     """
     try:
-        rc, out, err = run([exe_path], timeout=timeout)
+        rc, out, err = run([exe_path], timeout=timeout,
+                           stdin_data=stdin_data)
     except subprocess.TimeoutExpired:
         return None, f"运行超时（>{timeout}s，可能是死循环）"
     except OSError as e:
@@ -78,8 +86,12 @@ def execute(exe_path, timeout=30):
     return signed_exit(rc), ""
 
 
-def build_and_run(s_path, exe_path=None, keep=False, timeout=30, quiet=False):
-    """完整链路：.s -> 可执行 -> 退出码。返回 (退出码 或 None, 说明)。"""
+def build_and_run(s_path, exe_path=None, keep=False, timeout=30, quiet=False,
+                  stdin_data=None):
+    """完整链路：.s -> 可执行 -> 退出码。返回 (退出码 或 None, 说明)。
+
+    stdin_data 会喂给程序（scanf 从这里读）。
+    """
     s_path = os.path.abspath(s_path)
     if not os.path.exists(s_path):
         return None, f"找不到汇编文件 {s_path}"
@@ -93,7 +105,7 @@ def build_and_run(s_path, exe_path=None, keep=False, timeout=30, quiet=False):
     if not quiet:
         print(f"[asm_run] 已生成 {exe_path}", file=sys.stderr)
 
-    code, why = execute(exe_path, timeout=timeout)
+    code, why = execute(exe_path, timeout=timeout, stdin_data=stdin_data)
     if not keep:
         try:
             os.remove(exe_path)
@@ -109,6 +121,10 @@ def main(argv=None):
     ap.add_argument("--keep", action="store_true", help="保留可执行文件")
     ap.add_argument("--timeout", type=int, default=30, help="运行超时秒数")
     ap.add_argument("--quiet", action="store_true", help="不打印过程信息")
+    ap.add_argument("--stdin", dest="stdin_data", default=None,
+                    help="喂给程序的输入文本（scanf 从这里读）")
+    ap.add_argument("--stdin-file", dest="stdin_file", default=None,
+                    help="从文件读取程序输入")
     ap.add_argument("--keysym", action="store_true",
                     help="打印本脚本依赖的 ABI/汇编约定")
     args = ap.parse_args(argv)
@@ -120,8 +136,17 @@ def main(argv=None):
         ap.print_help()
         return 2
 
+    stdin_data = args.stdin_data
+    if args.stdin_file:
+        try:
+            stdin_data = open(args.stdin_file, encoding="utf-8").read()
+        except OSError as e:
+            print(f"[asm_run] 读不到输入文件: {e}", file=sys.stderr)
+            return 2
+
     code, why = build_and_run(args.asm, args.output, keep=args.keep,
-                              timeout=args.timeout, quiet=args.quiet)
+                              timeout=args.timeout, quiet=args.quiet,
+                              stdin_data=stdin_data)
     if code is None:
         print(f"[asm_run] {why}", file=sys.stderr)
         return 2                      # 2 = 本工具失败，不是程序的返回值

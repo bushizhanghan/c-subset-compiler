@@ -3348,7 +3348,25 @@ class Analyzer:
             return
         is_scan = fname in self._SCANF_FAMILY
         rest = call.args[fmt_idx + 1:]
-        for k, (spec, wants_ptr) in enumerate(specs):
+        for k, (spec, wants_ptr, legal) in enumerate(specs):
+            # 非法转换符：%D / %S / %q 这种大小写或拼写错误。
+            # gcc 报 -Wformat，但只在开了这个警告时；学生常看不到。
+            # 这里独立报一条，不受参数位置影响。
+            if not legal:
+                conv = spec[-1] if spec else "?"
+                hint = ""
+                _low = conv.lower()
+                if _low in self.LEGAL_CONV:
+                    hint = ("大小写写反了：%s 应该是 %%s"
+                            % conv if conv.isupper() and _low in "dxuoxfegcs"
+                            else "对应的合法格式符是 %%%s" % _low)
+                else:
+                    hint = ("检查格式符拼写。常用：%d 整数 / %f 小数 / "
+                            "%c 字符 / %s 字符串 / %p 指针")
+                self.warn("W30", fmt_node.line, fmt_node.col,
+                          f"{fname} 的格式符 %{spec} 不是合法的 C 转换说明",
+                          hint)
+                continue
             if k >= len(rest):
                 break
             info = self.FMT_SPECS.get(spec)
@@ -3450,8 +3468,19 @@ class Analyzer:
                 del self.diags[saved:]
             self._expr_depth = depth
 
+    # C11 标准 printf/scanf 的合法转换符（不含长度修饰符）。
+    # 任何不在此列的字符（%D、%S、%q、%y ...）都是非法格式符。
+    # 实测学生把 %d 写成 %D，早期实现因为"不在 FMT_SPECS 就 continue"
+    # 静默放行 —— 这是硬漏报，gcc 会报 -Wformat。
+    LEGAL_CONV = set("diouxXeEfFgGaAcspn%") | {"["}
+
     def _parse_fmt_specs(self, fmt):
-        """按顺序取出格式串里的转换说明符，返回 [(spec, 是否指针), ...]。"""
+        """按顺序取出格式串里的转换说明符。
+
+        返回 [(spec, wants_ptr, is_legal), ...]。
+        is_legal=False 表示这个转换符不在 C 标准里（%D 这种大小写写错），
+        调用方要报 W30，不能当没看见。
+        """
         out = []
         i, n = 0, len(fmt)
         while i < n:
@@ -3468,17 +3497,37 @@ class Analyzer:
             while i < n and fmt[i] in "-+ #0123456789.*":
                 i += 1
             head = ""
-            while i < n and fmt[i] in "hlLqjzt":
+            # C 标准的长度修饰符：h hh l ll L j z t q(BSD扩展)
+            # 注意 q 不是 C 标准，但在 glibc 里是 long long 的扩展；
+            # 单独一个 q 后面没跟转换符时，要当成错误报出来，
+            # 不能静默吞掉（实测 "printf(\"%q\")" 之前完全没反应）。
+            while i < n and fmt[i] in "hlLzj t":
                 head += fmt[i]
                 i += 1
             if i >= n:
+                # 长度修饰符后面没有转换符，报出来
+                if head:
+                    out.append((head + "?", False, False))
                 break
             conv = fmt[i]
+            # q 只有在后面还跟 d/i/u/o/x 时才算长度修饰符（glibc 扩展）
+            if conv == "q" and i + 1 < n and fmt[i + 1] in "dioux":
+                head += "q"
+                i += 1
+                conv = fmt[i]
             i += 1
+            # 扫描集 %[...]：跳过到 ] 为止，整体算一个合法转换
+            if conv == "[":
+                while i < n and fmt[i] != "]":
+                    i += 1
+                if i < n:
+                    i += 1
+                out.append((head + "[...]", True, True))
+                continue
             spec = head + conv
-            wants_ptr = conv in ("s", "p") or (
-                conv == "[" or conv == "n")
-            out.append((spec, wants_ptr))
+            wants_ptr = conv in ("s", "p", "n")
+            legal = conv in self.LEGAL_CONV
+            out.append((spec, wants_ptr, legal))
         return out
 
     def check_call(self, call: Call) -> Optional[str]:
