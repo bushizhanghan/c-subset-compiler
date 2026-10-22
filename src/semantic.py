@@ -350,12 +350,25 @@ def _vt_of_type(ty, decay: bool = True):
     base = ty.base or "int"
     is_arr = ty.array is not None or bool(ty.dims)
     ptr = ty.ptr
+    dims = tuple(ty.dims or ())
+    arr = ty.array if is_arr else None
     if is_arr and decay:
         ptr = ty.ptr + 1
+        # 多维数组退化：消掉最内层维度。
+        # `char m[20][21]` 退化后是 char(*)[21]（指向 char[21] 的指针），
+        # 剩余维度 [21] 要保留 —— 否则 m[i] 会被推成 char 值而不是
+        # char*（行地址），W23 会对 `scanf("%s", m[i])` 误报
+        # （实测 stu_25，gcc 零诊断）。
+        if dims:
+            rest = dims[1:]
+            dims = rest
+            arr = rest[0] if rest else None
+        elif arr is not None:
+            arr = None              # 一维数组退化后不再是数组
     return VT(base, ptr=ptr,
-              array=ty.array if is_arr else None,
+              array=arr,
               unsigned=bool(getattr(ty, "unsigned", False)),
-              dims=tuple(ty.dims or ()),
+              dims=dims,
               long_flag=bool(getattr(ty, "long_flag", False)))
 
 
@@ -949,7 +962,7 @@ class Analyzer:
                                     src, node, name, src_node)
 
     def check_assign_compat_vt(self, target_vt, src, node, name: str,
-                               src_node=None):
+                               src_node=None, from_decl=True):
         """赋值/初始化时的类型兼容检查（目标已是表达式层 VT）。
 
         历史上这里只有一条 float->int 的截断检查（W4），因为表达式层
@@ -973,8 +986,14 @@ class Analyzer:
         # C 规定数组名是不可修改的左值，`char c[4]; c = "hello";`
         # 是编译错误，gcc 报 "assignment to expression with array type"。
         # 学生从 Python/Java 过来时极容易这么写，而且错误信息看不懂。
-        # 注意：初始化列表 int a[3] = {1,2,3} 是合法的，不在检查范围。
+        #
+        # **只在赋值语句时报**：`char ds[5] = "WASD";` 是声明初始化，
+        # 用字符串字面量初始化 char 数组是 C 最标准的写法。
+        # 早期不区分来源，导致 stu_25 的合法初始化被误报
+        # （实测：char ds[5]="WASD" 报 E18，gcc 零诊断）。
         if getattr(target_vt, "array", None) is not None:
+            if from_decl:
+                return            # 声明初始化：字符串字面量/初始化列表都合法
             self.err("E18", node.line, node.col,
                      f"不能给数组 {name!r} 整体赋值",
                      "数组名是不可修改的左值；要初始化就在声明处写 "
@@ -1261,11 +1280,16 @@ class Analyzer:
                       f"{ctx} 的条件里用了赋值 =，通常是想写比较 ==",
                       f"如果确实要赋值，请改写成 ({cond.target.name} = ...) != 0")
         # 恒真恒假常量
+        # `while (1)` / `while (true)` 是最标准的主循环写法，不报。
+        # 只对 if 报 —— if 的恒真条件几乎总是"漏了比较"；
+        # 循环的恒真条件通常是故意的（配合 break/return 退出）。
+        # 实测 stu_25 的主循环 while(1) 被误报。
         if isinstance(cond, Num):
             truth = bool(cond.value)
-            self.warn("W5", cond.line, cond.col,
-                      f"条件恒为{'真' if truth else '假'}（常量 {cond.value}）",
-                      "检查是否漏写了变量或比较")
+            if ctx == "if" or not truth:
+                self.warn("W5", cond.line, cond.col,
+                          f"条件恒为{'真' if truth else '假'}（常量 {cond.value}）",
+                          "检查是否漏写了变量或比较")
         # 浮点比较的精度风险（W5）。
         #
         # 判据必须落在"被比较的两个操作数"上，而不是条件整体的类型：
@@ -2859,20 +2883,34 @@ class Analyzer:
         return self.check_expr(e)
 
     def index_type(self, bt):
-        """数组/指针取一次下标的元素类型。"""
+        """数组/指针取一次下标的元素类型。
+
+        二维数组的退化形态带 dims（`char m[20][21]` 退化后
+        ptr=1, dims=(21,)），取下标后剩余维度要保留 ——
+        否则 m[i] 被推成 char 值而不是 char*（行地址），
+        W23 会对 `scanf("%s", m[i])` 误报（实测 stu_25）。
+        """
         if bt is None:
             return VT("int")        # 推导不到就退回 int，绝不因此误报
         if bt.ptr > 0:
-            return VT(str(bt), ptr=bt.ptr - 1, array=None,
-                      unsigned=bt.unsigned)
+            # 指针剥一层；若它还带 dims（二维数组退化出来的
+            # 指针指向内层数组），剩余维度跟着走
+            rest = list(bt.dims or ())
+            return VT(str(bt), ptr=bt.ptr - 1,
+                      array=rest[0] if rest else None,
+                      unsigned=bt.unsigned, dims=rest,
+                      long_flag=getattr(bt, "long_flag", False))
         if bt.dims:
             rest = list(bt.dims)[1:]
             return VT(str(bt), ptr=0,
                       array=rest[0] if rest else None,
-                      unsigned=bt.unsigned, dims=rest)
+                      unsigned=bt.unsigned, dims=rest,
+                      long_flag=getattr(bt, "long_flag", False))
         if bt.array is not None:
-            return VT(str(bt), ptr=0, array=None, unsigned=bt.unsigned)
-        return VT(str(bt), ptr=0, array=None, unsigned=bt.unsigned)
+            return VT(str(bt), ptr=0, array=None, unsigned=bt.unsigned,
+                      long_flag=getattr(bt, "long_flag", False))
+        return VT(str(bt), ptr=0, array=None, unsigned=bt.unsigned,
+                  long_flag=getattr(bt, "long_flag", False))
 
     def check_assign_compat_table(self, tt, vt, node, target_node, value_node):
         """按左值类型做赋值兼容检查。
