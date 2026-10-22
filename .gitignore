@@ -186,3 +186,10 @@ _dbg8*.py
 _cm34.py
 
 _cm35.py
+
+# web 服务日志
+_web.log
+_web.err
+_shot*.png
+_snap.*
+
