@@ -355,6 +355,13 @@ def _vt_of_type(ty, decay: bool = True):
     if ty is None:
         return None
     base = ty.base or "int"
+    # size_t 归一成 unsigned long。声明 `size_t len = strlen(s);`
+    # 后 len 的符号性要正确，否则 len < sizeof(buf) 两个无符号数
+    # 被 W2 误报混合比较（实测 stu_40，gcc 零诊断）。
+    unsigned = bool(getattr(ty, "unsigned", False))
+    if base == "size_t":
+        base = "long"
+        unsigned = True
     is_arr = ty.array is not None or bool(ty.dims)
     ptr = ty.ptr
     dims = tuple(ty.dims or ())
@@ -374,7 +381,7 @@ def _vt_of_type(ty, decay: bool = True):
             arr = None              # 一维数组退化后不再是数组
     return VT(base, ptr=ptr,
               array=arr,
-              unsigned=bool(getattr(ty, "unsigned", False)),
+              unsigned=unsigned,
               dims=dims,
               long_flag=bool(getattr(ty, "long_flag", False)))
 
@@ -3593,9 +3600,14 @@ class Analyzer:
             if ret is None:
                 return None
             base, ptr = ret
-            # size_t 是无符号类型。丢掉这个信息，`i < strlen(s)`
-            # 的有符号/无符号混合比较就查不出来（实测 stu_05，
-            # gcc 的 -Wsign-compare 报了，csub 漏了）。
+            # size_t 是无符号的 long（Windows x64 上是 64 位）。
+            # 归一成 long + unsigned 标记，让 W2/W23 用统一的
+            # 类型体系判断。早期 base 保持 "size_t" 字符串，
+            # W2 的无符号判定不认这个名字，`len < sizeof(buf)`
+            # 两个无符号数被误报"有符号与无符号混合比较"
+            # （实测 stu_40，gcc 零诊断）。
+            if base == "size_t":
+                return VT("long", ptr=ptr, unsigned=True)
             uns = (base == "size_t")
             return VT(base, ptr=ptr, unsigned=uns)
 
