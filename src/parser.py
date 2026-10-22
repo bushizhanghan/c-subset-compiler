@@ -26,6 +26,8 @@ class Node:
 @dataclass
 class Program(Node):
     decls: list = field(default_factory=list)
+    # typedef enum 登记的成员名（int 常量），语义层 E1 检查要用
+    enum_consts: set = field(default_factory=set)
 
 
 @dataclass
@@ -296,6 +298,10 @@ class Parser:
         # 已知的 typedef 类型名。解析到 typedef 时登记，
         # 用于区分 (LinkList)x 和 (*(init))() —— 后者不是类型转换。
         self.known_types = set(self.BUILTIN_TYPEDEFS)
+        # 枚举成员名。typedef enum { success, failure } Status; 里
+        # success/failure 是 int 常量，使用处不该报 E1。
+        # （实测 address_book 的 `== failure` 被误报 8 条。）
+        self.enum_consts = set()
         # 已出现的变量名，用于区分 (var) 和 (TypeName)
         self.known_vars = set()
         # 当前递归深度，由 enter_nest / leave_nest 维护
@@ -490,6 +496,9 @@ class Parser:
                 # 恢复后没前进就强制消耗一个 token，防死循环
                 if self.i == start:
                     self.advance()
+        # 枚举成员在解析 typedef enum 时才登记，
+        # 必须在循环结束后再挂到 prog（早期放在循环前，永远是空集）
+        prog.enum_consts = set(self.enum_consts)
         return prog
 
     def _recover_to_next_decl(self):
@@ -649,6 +658,59 @@ class Parser:
 
     def parse_typedef(self):
         kw = self.advance()          # typedef
+        # typedef enum { ... } Status;
+        # 枚举成员是 int 常量，登记到 enum_consts 供语义层查
+        if self.cur.kind == Tok.KW and self.cur.value == "enum":
+            self.advance()
+            tag = ""
+            if self.at_kind(Tok.IDENT):
+                tag = self.advance().value
+            members = []
+            if self.at("{"):
+                self.advance()
+                val = 0
+                while not self.at("}") and not self.at_kind(Tok.EOF):
+                    if self.at_kind(Tok.IDENT):
+                        name = self.advance().value
+                        if self.at("="):
+                            self.advance()
+                            v = None
+                            if self.cur.kind == Tok.NUM:
+                                v = int(self.advance().value, 0)
+                            elif self.cur.value == "-":
+                                self.advance()
+                                v = -int(self.advance().value, 0)
+                            members.append((name, v))
+                            if v is not None:
+                                val = v + 1
+                        else:
+                            members.append((name, val))
+                            val += 1
+                    if self.at(","):
+                        self.advance()
+                        continue
+                    break
+                self.expect("}")
+            # 后面的别名列表
+            aliases = []
+            while True:
+                alias = self.expect_kind(Tok.IDENT, "类型别名").value
+                self.known_types.add(alias)
+                aliases.append(alias)
+                if self.at(","):
+                    self.advance()
+                    continue
+                break
+            self.expect(";")
+            self.enum_consts.update(n for n, _ in members)
+            sd = StructDef(line=kw.line, col=kw.col, tag=tag,
+                           members=[])
+            sd.is_enum = True
+            for alias in aliases:
+                sd.typedefs.append(
+                    (alias, Type(base="int")))
+            return sd
+
         # typedef struct [tag] { ... } A, *B;
         if self.cur.kind == Tok.KW and self.cur.value == "struct":
             self.advance()

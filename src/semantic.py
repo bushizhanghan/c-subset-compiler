@@ -145,6 +145,7 @@ STD_FUNCS = {
     "ceil": (1, 1, set()), "log": (1, 1, set()),
     "exp": (1, 1, set()), "sin": (1, 1, set()), "cos": (1, 1, set()),
     "fopen": (2, 2, set()), "fclose": (1, 1, set()),
+    "remove": (1, 1, set()), "rename": (2, 2, set()),
     "fprintf": (2, 99, set()), "fscanf": (2, 99, "needs_addr_out"),
     "fgets": (3, 3, set()), "sprintf": (2, 99, set()),
     "snprintf": (3, 99, set()), "atoi": (1, 1, set()),
@@ -573,6 +574,8 @@ class Analyzer:
         self._reported_e1 = set()
         # W29：malloc 分配字节数（变量名 -> 字节数）
         self._alloc_bytes = {}
+        # 枚举成员名（parser 从 typedef enum 里登记）
+        self.enum_consts = set()
         # 外部依赖检测：未声明函数的调用集合 + 模式开关
         self._ext_dep_mode = False
         # 阈值：未声明函数超过 5 个（去重）就判定依赖缺失头文件。
@@ -647,6 +650,8 @@ class Analyzer:
                 self._scan_calls(c, unknown, depth + 1)
 
     def analyze(self, prog: Program) -> list:
+        # 枚举成员名（parser 侧 typedef enum 登记）
+        self.enum_consts = set(getattr(prog, "enum_consts", ()) or ())
         # 第零遍：登记 typedef 出来的类型名，否则 Node / LinkList 会被当变量
         for d in prog.decls:
             if isinstance(d, StructDef):
@@ -1390,6 +1395,11 @@ class Analyzer:
             if sym is None and _is_likely_external_macro(e.name):
                 return None
             if sym is None:
+                # 枚举成员是 int 常量：typedef enum { success, failure }
+                # 的 failure 用在 `x == failure` 里完全合法。
+                # 早期不认枚举，报 8 条"未声明变量"（实测 address_book）。
+                if e.name in self.enum_consts:
+                    return VT("int")
                 # 同名变量在同一行只报一次。
                 # 实测 stu_18：`int max1=nums[0],max2=nums[0],max3=nums[0];`
                 # 在函数外（因为多了一个 }），nums 被三个初始化各报一次
@@ -3021,6 +3031,7 @@ class Analyzer:
         "fputs": "stdio.h", "putchar": "stdio.h",
         "getchar": "stdio.h", "fgets": "stdio.h",
         "fopen": "stdio.h", "fclose": "stdio.h",
+        "remove": "stdio.h", "rename": "stdio.h",
         "fflush": "stdio.h", "perror": "stdio.h",
         "isalpha": "ctype.h", "isdigit": "ctype.h",
         "isspace": "ctype.h", "toupper": "ctype.h",
