@@ -44,14 +44,23 @@ def main():
                       None, token)["object"]["sha"]
     print("远端 main: " + remote_sha[:7])
 
-    files = git("ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    # -z：NUL 分隔 + 禁用路径转义。
+    # 不加的话中文文件名（使用说明.md）会被转成
+    # "\344\275\277..." 的八进制形式，后面 git cat-file 找不到。
+    raw = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
+        cwd=ROOT, capture_output=True, check=True).stdout
+    files = [p.decode("utf-8") for p in raw.split(b"\x00") if p]
     print("本地文件数: %d" % len(files))
 
     items = []
     for i, path in enumerate(files, 1):
-        raw = subprocess.run(["git", "cat-file", "-p", "HEAD:" + path],
-                             cwd=ROOT, capture_output=True,
-                             check=True).stdout
+        # -c core.quotePath=false 让中文路径按原样读
+        raw = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "cat-file", "-p",
+             "HEAD:" + path],
+            cwd=ROOT, capture_output=True,
+            check=True).stdout
         try:
             text = raw.decode("utf-8")
             blob = call("POST", "/repos/%s/%s/git/blobs" % (OWNER, REPO),

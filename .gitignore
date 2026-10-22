@@ -193,3 +193,11 @@ _web.err
 _shot*.png
 _snap.*
 
+
+# 打包产物（可重新生成，不进库）
+dist/
+build/
+*.spec
+*.zip
+csub-v1.0-win64.zip
+
