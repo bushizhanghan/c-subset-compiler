@@ -1124,7 +1124,7 @@ footer b{
     <div class="mark"><span>&lt;/&gt;</span></div>
     <div class="title-wrap">
       <div class="title">csub 诊断台</div>
-      <div class="subtitle">C SUBSET COMPILER · v2.0</div>
+      <div class="subtitle">C SUBSET COMPILER · v3.1</div>
     </div>
   </div>
   <div class="spacer"></div>

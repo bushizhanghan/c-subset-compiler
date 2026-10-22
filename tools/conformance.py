@@ -338,6 +338,251 @@ CASES = [
 ]
 
 
+# ══════════════════════════════════════════════════════════════
+# 第二轮扩充：真实学生作业高频写法（+54）
+# ══════════════════════════════════════════════════════════════
+CASES += [
+    # ── 算术/边界 ──
+    ("arith2", "负数取模", '#include <stdio.h>\n'
+     'int main(){ printf("%d %d\n", -7%3, 7%-3); return 0; }', None),
+    ("arith2", "long long", '#include <stdio.h>\n'
+     'int main(){ long long x=123456789; x=x*x;'
+     ' printf("%lld\n", x); return 0; }', None),
+    ("arith2", "char 溢出", '#include <stdio.h>\n'
+     'int main(){ char c=127; c=c+1; printf("%d\n", c); return 0; }', None),
+    ("arith2", "混合类型运算", '#include <stdio.h>\n'
+     'int main(){ int a=3; float b=2.5f;'
+     ' printf("%.1f\n", a+b); return 0; }', None),
+    ("arith2", "移位运算", '#include <stdio.h>\n'
+     'int main(){ int x=1; printf("%d %d\n", x<<10, 1024>>3); return 0; }',
+     None),
+    ("arith2", "三元嵌套", '#include <stdio.h>\n'
+     'int main(){ int a=5; printf("%d\n", a>10?1:a>3?2:3); return 0; }',
+     None),
+    ("arith2", "逗号表达式", '#include <stdio.h>\n'
+     'int main(){ int a=1; int b=(a=5, a+1);'
+     ' printf("%d %d\n", a, b); return 0; }', None),
+    ("arith2", "复合位运算", '#include <stdio.h>\n'
+     'int main(){ int x=255; x&=15; x|=256; x^=1;'
+     ' printf("%d\n", x); return 0; }', None),
+
+    # ── 控制流 ──
+    ("flow2", "switch 穿透", '#include <stdio.h>\n'
+     'int main(){ int x=3; switch(x){'
+     ' case 1: case 2: printf("low "); break;'
+     ' case 3: printf("mid ");'
+     ' case 4: printf("high "); break; }'
+     ' printf("\n"); return 0; }', None),
+    ("flow2", "switch default 前置", '#include <stdio.h>\n'
+     'int main(){ int x=9; switch(x){'
+     ' default: printf("def "); break;'
+     ' case 1: printf("one "); }'
+     ' printf("\n"); return 0; }', None),
+    ("flow2", "do while 至少一次", '#include <stdio.h>\n'
+     'int main(){ int i=10; do { printf("once\n"); } while(i<5);'
+     ' return 0; }', None),
+    ("flow2", "continue 在 while", '#include <stdio.h>\n'
+     'int main(){ int i=0, s=0; while(i<10){ i=i+1;'
+     ' if(i%2==0){ continue; } s=s+i; }'
+     ' printf("%d\n", s); return 0; }', None),
+    ("flow2", "嵌套 break", '#include <stdio.h>\n'
+     'int main(){ int i,j; for(i=0;i<3;i=i+1){'
+     ' for(j=0;j<3;j=j+1){ if(j==2){ break; }'
+     ' printf("%d%d ", i, j); } }'
+     ' printf("\n"); return 0; }', None),
+    ("flow2", "循环里定义变量", '#include <stdio.h>\n'
+     'int main(){ int i; for(i=0;i<3;i=i+1){'
+     ' int local=i*2; printf("%d ", local); }'
+     ' printf("\n"); return 0; }', None),
+    ("flow2", "if 块内变量", '#include <stdio.h>\n'
+     'int main(){ int a=5; if(a>3){ int b=10; printf("%d\n", b); }'
+     ' return 0; }', None),
+
+    # ── 函数 ──
+    ("func2", "函数内多变量", '#include <stdio.h>\n'
+     'int f(int n){ int a=n, b=n+1, c=n+2; return a+b+c; }\n'
+     'int main(){ printf("%d\n", f(10)); return 0; }', None),
+    ("func2", "递归汉诺塔计数", '#include <stdio.h>\n'
+     'int hanoi(int n){ if(n==1){ return 1; }'
+     ' return 2*hanoi(n-1)+1; }\n'
+     'int main(){ printf("%d\n", hanoi(4)); return 0; }', None),
+    ("func2", "函数修改全局", '#include <stdio.h>\n'
+     'int cnt=0;\nvoid inc(){ cnt=cnt+1; }\n'
+     'int main(){ inc(); inc(); inc();'
+     ' printf("%d\n", cnt); return 0; }', None),
+    ("func2", "递归求和", '#include <stdio.h>\n'
+     'int sum(int n){ if(n==0){ return 0; }'
+     ' return n+sum(n-1); }\n'
+     'int main(){ printf("%d\n", sum(100)); return 0; }', None),
+    ("func2", "void 函数图案", '#include <stdio.h>\n'
+     'void line(int n){ int i; for(i=0;i<n;i=i+1){'
+     ' printf("*"); } printf("\n"); }\n'
+     'int main(){ line(5); line(3); return 0; }', None),
+    ("func2", "绝对值比较", '#include <stdio.h>\n'
+     'int abs2(int x){ if(x<0){ return -x; } return x; }\n'
+     'int main(){ if(abs2(-5)==5){ printf("ok\n"); } return 0; }', None),
+
+    # ── 数组 ──
+    ("array2", "数组部分初始化", '#include <stdio.h>\n'
+     'int main(){ int a[5]={1,2};'
+     ' printf("%d %d %d\n", a[0], a[1], a[4]); return 0; }', None),
+    ("array2", "数组倒序", '#include <stdio.h>\n'
+     'int main(){ int a[4]={1,2,3,4}; int i,j,t;'
+     ' for(i=0;i<4/2;i=i+1){ j=3-i; t=a[i]; a[i]=a[j]; a[j]=t; }'
+     ' for(i=0;i<4;i=i+1){ printf("%d ", a[i]); }'
+     ' printf("\n"); return 0; }', None),
+    ("array2", "数组查找", '#include <stdio.h>\n'
+     'int main(){ int a[5]={1,2,3,4,5}; int i, found=-1;'
+     ' for(i=0;i<5;i=i+1){ if(a[i]==3){ found=i; break; } }'
+     ' printf("%d\n", found); return 0; }', None),
+    ("array2", "数组统计", '#include <stdio.h>\n'
+     'int main(){ int a[8]={1,2,2,3,3,3,4,5}; int i, c=0;'
+     ' for(i=0;i<8;i=i+1){ if(a[i]==3){ c=c+1; } }'
+     ' printf("%d\n", c); return 0; }', None),
+    ("array2", "数组拷贝", '#include <stdio.h>\n'
+     'int main(){ int a[3]={7,8,9}; int b[3]; int i;'
+     ' for(i=0;i<3;i=i+1){ b[i]=a[i]; }'
+     ' printf("%d %d %d\n", b[0], b[1], b[2]); return 0; }', None),
+    ("array2", "字符数组统计元音", '#include <stdio.h>\n'
+     'int main(){ char s[16]="hello world"; int i,c=0;'
+     ' for(i=0;s[i]!=0;i=i+1){'
+     ' if(s[i]==97||s[i]==101||s[i]==105||s[i]==111||s[i]==117){'
+     ' c=c+1; } }'
+     ' printf("%d\n", c); return 0; }', None),
+
+    # ── 指针 ──
+    ("ptr2", "指针当游标", '#include <stdio.h>\n'
+     'int main(){ int a[4]={10,20,30,40}; int *p=a; int s=0; int i;'
+     ' for(i=0;i<4;i=i+1){ s=s+*p; p=p+1; }'
+     ' printf("%d\n", s); return 0; }', None),
+    ("ptr2", "指针改数组", '#include <stdio.h>\n'
+     'int main(){ int a[3]={1,2,3}; int *p=a; *(p+1)=99;'
+     ' printf("%d %d %d\n", a[0], a[1], a[2]); return 0; }', None),
+    ("ptr2", "swap 函数", '#include <stdio.h>\n'
+     'void sw(int *a, int *b){ int t=*a; *a=*b; *b=t; }\n'
+     'int main(){ int x=1, y=2; sw(&x, &y);'
+     ' printf("%d %d\n", x, y); return 0; }', None),
+
+    # ── 结构体 ──
+    ("struct2", "结构体数组排序", '#include <stdio.h>\n'
+     'struct S { int v; };\n'
+     'int main(){ struct S a[4]; int i,j; struct S t;'
+     ' a[0].v=3; a[1].v=1; a[2].v=4; a[3].v=2;'
+     ' for(i=0;i<3;i=i+1){ for(j=0;j<3-i;j=j+1){'
+     ' if(a[j].v>a[j+1].v){ t=a[j]; a[j]=a[j+1]; a[j+1]=t; } } }'
+     ' for(i=0;i<4;i=i+1){ printf("%d ", a[i].v); }'
+     ' printf("\n"); return 0; }', None),
+    ("struct2", "结构体成员运算", '#include <stdio.h>\n'
+     'struct P { int x; int y; };\n'
+     'int main(){ struct P p; p.x=1; p.y=2; int s=p.x+p.y;'
+     ' printf("%d\n", s); return 0; }', None),
+    ("struct2", "typedef + 指针", '#include <stdio.h>\n'
+     'typedef struct { int v; } T;\n'
+     'int main(){ T a[2]; T *p=a; p->v=7; (p+1)->v=8;'
+     ' printf("%d %d\n", a[0].v, a[1].v); return 0; }', None),
+
+    # ── 字符串处理 ──
+    ("str2", "字符转大写", '#include <stdio.h>\n'
+     'int main(){ char s[16]="hello"; int i;'
+     ' for(i=0;s[i]!=0;i=i+1){'
+     ' if(s[i]>=97 && s[i]<=122){ s[i]=s[i]-32; } }'
+     ' printf("%s\n", s); return 0; }', None),
+    ("str2", "字符串比较", '#include <stdio.h>\n'
+     'int main(){ char a[16]="abc"; char b[16]="abc";'
+     ' int i, same=1;'
+     ' for(i=0;a[i]!=0||b[i]!=0;i=i+1){'
+     ' if(a[i]!=b[i]){ same=0; break; } }'
+     ' printf("%d\n", same); return 0; }', None),
+    ("str2", "数字字符求和", '#include <stdio.h>\n'
+     'int main(){ char s[16]="12345"; int i, s2=0;'
+     ' for(i=0;s[i]!=0;i=i+1){ s2=s2+(s[i]-48); }'
+     ' printf("%d\n", s2); return 0; }', None),
+
+    # ── 真实作业形态 ──
+    ("real2", "判断闰年", '#include <stdio.h>\n'
+     'int main(){ int y=2024;'
+     ' if((y%4==0 && y%100!=0) || y%400==0){'
+     ' printf("leap\n"); } else { printf("no\n"); }'
+     ' return 0; }', None),
+    ("real2", "水仙花数", '#include <stdio.h>\n'
+     'int main(){ int n=153, a,b,c;'
+     ' a=n/100; b=n/10%10; c=n%10;'
+     ' if(a*a*a+b*b*b+c*c*c==n){ printf("yes\n"); }'
+     ' return 0; }', None),
+    ("real2", "斐波那契数组", '#include <stdio.h>\n'
+     'int main(){ int f[10]; int i; f[0]=1; f[1]=1;'
+     ' for(i=2;i<10;i=i+1){ f[i]=f[i-1]+f[i-2]; }'
+     ' printf("%d\n", f[9]); return 0; }', None),
+    ("real2", "选择排序", '#include <stdio.h>\n'
+     'int main(){ int a[5]={5,2,4,1,3}; int i,j,m,t;'
+     ' for(i=0;i<4;i=i+1){ m=i;'
+     '  for(j=i+1;j<5;j=j+1){ if(a[j]<a[m]){ m=j; } }'
+     '  t=a[i]; a[i]=a[m]; a[m]=t; }'
+     ' for(i=0;i<5;i=i+1){ printf("%d ", a[i]); }'
+     ' printf("\n"); return 0; }', None),
+    ("real2", "插入排序", '#include <stdio.h>\n'
+     'int main(){ int a[5]={5,2,4,1,3}; int i,j,t;'
+     ' for(i=1;i<5;i=i+1){ t=a[i]; j=i-1;'
+     '  while(j>=0 && a[j]>t){ a[j+1]=a[j]; j=j-1; }'
+     '  a[j+1]=t; }'
+     ' for(i=0;i<5;i=i+1){ printf("%d ", a[i]); }'
+     ' printf("\n"); return 0; }', None),
+    ("real2", "杨辉三角", '#include <stdio.h>\n'
+     'int main(){ int t[5][5]; int i,j;'
+     ' for(i=0;i<5;i=i+1){ t[i][0]=1;'
+     '  for(j=1;j<=i;j=j+1){'
+     '   t[i][j]=t[i-1][j-1]+t[i-1][j]; } }'
+     ' printf("%d %d %d\n", t[4][0], t[4][2], t[4][4]);'
+     ' return 0; }', None),
+    ("real2", "统计平均", '#include <stdio.h>\n'
+     'int main(){ int s[6]={85,92,78,90,88,76}; int i, sum=0;'
+     ' for(i=0;i<6;i=i+1){ sum=sum+s[i]; }'
+     ' printf("%d\n", sum/6); return 0; }', None),
+    ("real2", "逆序输出数字", '#include <stdio.h>\n'
+     'int main(){ int n=12345;'
+     ' while(n>0){ printf("%d", n%10); n=n/10; }'
+     ' printf("\n"); return 0; }', None),
+    ("real2", "摄氏转华氏", '#include <stdio.h>\n'
+     'int main(){ float c=37.0f; float f=c*9.0f/5.0f+32.0f;'
+     ' printf("%.1f\n", f); return 0; }', None),
+    ("real2", "一到一百求和", '#include <stdio.h>\n'
+     'int main(){ int i, s=0; for(i=1;i<=100;i=i+1){ s=s+i; }'
+     ' printf("%d\n", s); return 0; }', None),
+    ("real2", "乘法表", '#include <stdio.h>\n'
+     'int main(){ int i,j; for(i=1;i<=3;i=i+1){'
+     ' for(j=1;j<=i;j=j+1){ printf("%d*%d=%d ", i, j, i*j); } }'
+     ' printf("\n"); return 0; }', None),
+    ("real2", "质数计数", '#include <stdio.h>\n'
+     'int is_prime(int n){ int i;'
+     ' if(n<2){ return 0; }'
+     ' for(i=2;i*i<=n;i=i+1){ if(n%i==0){ return 0; } }'
+     ' return 1; }\n'
+     'int main(){ int c=0, n; for(n=2;n<=30;n=n+1){'
+     ' if(is_prime(n)){ c=c+1; } }'
+     ' printf("%d\n", c); return 0; }', None),
+    ("real2", "gcd 递归", '#include <stdio.h>\n'
+     'int gcd(int a, int b){ if(b==0){ return a; }'
+     ' return gcd(b, a%b); }\n'
+     'int main(){ printf("%d\n", gcd(1071, 462)); return 0; }', None),
+    ("real2", "二进制转十进制", '#include <stdio.h>\n'
+     'int main(){ int b=1101, d=0, w=1;'
+     ' while(b>0){ d=d+(b%10)*w; b=b/10; w=w*2; }'
+     ' printf("%d\n", d); return 0; }', None),
+    ("real2", "三角形判断", '#include <stdio.h>\n'
+     'int main(){ int a=3, b=4, c=5;'
+     ' if(a+b>c && b+c>a && a+c>b){'
+     ' printf("valid\n"); } else { printf("invalid\n"); }'
+     ' return 0; }', None),
+    ("real2", "第二大值", '#include <stdio.h>\n'
+     'int main(){ int a[5]={3,9,2,7,5}; int i, m1=a[0], m2=a[0];'
+     ' for(i=1;i<5;i=i+1){'
+     '  if(a[i]>m1){ m2=m1; m1=a[i]; }'
+     '  else if(a[i]>m2){ m2=a[i]; } }'
+     ' printf("%d\n", m2); return 0; }', None),
+]
+
+
+
 def run_gcc(src, stdin_data):
     """用 gcc 编译并运行，返回 (stdout, 退出码) 或 (None, 错误)。"""
     d = tempfile.mkdtemp()

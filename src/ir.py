@@ -310,8 +310,26 @@ class IRGen:
         # 早期版本走通用路径，InitList 落到兜底 return "?"，
         # 于是生成 `a = ?`，而且 store 的 extra 是空的，不可执行。
         if isinstance(vd.init, InitList):
-            for idx, item in enumerate(vd.init.items):
-                v = self.gen_expr(item)
+            # 支持嵌套初始化列表：int a[2][3]={{1,2,3},{4,5,6}};
+            # 按行主序拍平成扁平下标 store（0,1,2,3,4,5）。
+            # 早期直接把嵌套 InitList 当标量 gen_expr，得到字面量
+            # "initlist" 存进数组，读出来是垃圾（实测边界测试）。
+            flat = []
+
+            def flatten(items, row_len):
+                for it in items:
+                    if isinstance(it, InitList):
+                        flatten(it.items, row_len)
+                    else:
+                        flat.append(self.gen_expr(it))
+            # 行宽 = 内层列表长度（用于跨行连续编号）
+            row_len = 1
+            for it in vd.init.items:
+                if isinstance(it, InitList):
+                    row_len = len(it.items)
+                    break
+            flatten(vd.init.items, row_len)
+            for idx, v in enumerate(flat):
                 self.emit("store", a1=str(idx), a2=v, extra=vd.name,
                           line=vd.line)
             return

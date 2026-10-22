@@ -416,7 +416,14 @@ class FuncGen:
         ptr = set()
         for n in names:
             ty = self.types.get(n)
-            if ty is not None and getattr(ty, "ptr", 0):
+            if ty is None:
+                continue
+            # 数组优先：int *p[3] 的 ptr 属性也是 1（元素是指针），
+            # 但它本身是数组不是指针变量。误判成指针会让 lea_base
+            # 取槽里的"值"当地址（实测 *p[0] 访问违例）。
+            if _is_array(ty):
+                continue
+            if getattr(ty, "ptr", 0):
                 ptr.add(n)
         changed = True
         while changed:
@@ -432,6 +439,16 @@ class FuncGen:
                 # 就是野指针，运行直接 0xC0000005（实测）。
                 if ins.op == "call" and ins.dst \
                         and ins.a1 in PTR_RETURNING_FUNCS:
+                    if ins.dst not in ptr:
+                        ptr.add(ins.dst)
+                        changed = True
+                # 自定义的"返回指针的函数"：int *at(int i){ return &g[i]; }
+                # 不认这个，*at(1)=99 里接返回值的临时量会被当标量，
+                # store 时按 4 字节写，指针高位丢失，写进错误地址
+                # （实测 *at(1)=99 报"对非数组做下标写"）。
+                if ins.op == "call" and ins.dst \
+                        and ins.a1 in getattr(self, "ptr_returning_funcs",
+                                              ()):
                     if ins.dst not in ptr:
                         ptr.add(ins.dst)
                         changed = True
@@ -461,9 +478,43 @@ class FuncGen:
 
     def alloc(self):
         names = self.scan_symbols()
+        # ── 形参类型覆盖 ──
+        # collect_types 是全局共享的，同名变量在不同函数里类型可能不同：
+        # `int f(int a[], int n)` 的形参 a 在 main 里是 int[4] 数组，
+        # 在 f 里已退化成指针。不覆盖的话 f 里 a+1 会按"数组元素数×
+        # 元素大小"分配槽位、按 32 位存取，指针算术直接算错
+        # （实测 f(a+1,n-1) 递归读数组输出空/垃圾）。
+        # 形参在本函数内一律按退化后的类型看：数组形参 = 指针。
+        params = self.param_names()
+        for p in params:
+            ty = self.types.get(p)
+            if ty is None:
+                continue
+            if _is_array(ty):
+                # 数组形参退化为指针：指向首元素
+                self.types[p] = Type(base=(ty.base or "int").replace(
+                    "struct ", ""), ptr=1)
+            elif getattr(ty, "ptr", 0):
+                self.types[p] = ty
         # 全局变量不进栈：它们在 .data / .bss 段，走 RIP 相对寻址。
         # 早期不排除它们，会安静地分配一块栈槽去"存"全局变量，
         # 于是读写全打在栈上，全局变量永远是 0——典型的静默算错。
+        # 但 kinds/sizes 仍要登记：gen_load/store 靠 kinds 判"是不是数组"，
+        # 不登记的话全局数组 g[3] 访问会报"对非数组做下标访问"
+        # （实测全局数组 g[3]={7,8,9} 编译直接被拒）。
+        # scan_symbols 只扫函数体，全局段的名字要在这里补。
+        for n in getattr(self, "global_names", ()):
+            if n in self.kinds:
+                continue
+            ty = self.types.get(n)
+            if _is_array(ty):
+                self.kinds[n] = "array"
+                self.sizes[n] = max(_array_len(ty)
+                                    * (_elem_size(ty) if ty else 4), 4)
+            elif ty is not None and (ty.ptr or 0) > 0:
+                self.kinds[n] = "ptr"
+            else:
+                self.kinds[n] = "scalar"
         names = [n for n in names
                  if n not in getattr(self, "global_names", ())]
         self.ptr_names = self.detect_pointers(names)
@@ -593,9 +644,13 @@ class FuncGen:
             self.line(f"mov {self.mem(name)}, {reg}")
             return
         off = self.slot(name)
-        if self.kinds[name] == "array":
+        if self.kinds.get(name) == "array":
             raise CodegenError(f"函数 {self.name}: 不能给数组名 '{name}' 赋值")
-        if self.kinds[name] == "ptr":
+        # 判据要同时看 kinds 和 ptr_names：addr/addrof 的产物是临时量，
+        # kinds 是 scalar 但装的是 64 位地址。只看 kinds 会用
+        # mov DWORD 截断高位，栈地址一丢就是野指针
+        # （实测 int *p[3]; p[0]=&a; *p[0] 读到垃圾）。
+        if self.kinds.get(name) == "ptr" or name in getattr(self, "ptr_names", ()):
             self.line(f"mov QWORD PTR [rbp-{off}], {R64.get(reg, reg)}")
         else:
             self.line(f"mov DWORD PTR [rbp-{off}], {reg}")
@@ -604,13 +659,20 @@ class FuncGen:
         """把名字的地址放进寄存器：数组/标量取栈地址，指针取槽里的值。
 
         全局变量取的是它在 .data 段的绝对地址（用 lea rip 相对）。
+        指针临时量（如 *at(1)=99 里的 t2、int *p[3] 取出的 p[0]）：
+        槽里存的就是地址，按指针取。判据必须同时看 kinds 和
+        ptr_names——kinds 里它们是 scalar（alloc 时按 4 字节分的槽），
+        但运行期装 64 位地址；只看 kinds 会走 lea 分支取到槽地址本身
+        （实测 *p[0] 把栈地址当 int 打出来）。
         """
         if name in getattr(self, "global_names", ()):
             label = re.sub(r'[^0-9A-Za-z_]', '_', name)
             self.line(f"lea {reg}, {label}[rip]")
             return
+        is_ptr = (self.kinds.get(name) == "ptr"
+                  or name in getattr(self, "ptr_names", ()))
         off = self.slot(name)
-        if self.kinds[name] == "ptr":
+        if is_ptr:
             self.line(f"mov {reg}, QWORD PTR [rbp-{off}]")
         else:
             # array / scalar / struct 都是取栈上地址。
@@ -1288,7 +1350,9 @@ class FuncGen:
         base, idx = ins.a1, ins.a2
         if not _is_name(base):
             raise CodegenError(f"函数 {self.name}: load 的基址 '{base}' 无法识别")
-        if self.kinds.get(base) not in ("array", "ptr"):
+        # 指针临时量（函数返回的指针）也算合法基址
+        if self.kinds.get(base) not in ("array", "ptr") \
+                and base not in getattr(self, "ptr_names", ()):
             raise CodegenError(
                 f"函数 {self.name}: 对非数组/非指针 '{base}' 做下标访问")
         ty = self.types.get(base)
@@ -1310,8 +1374,13 @@ class FuncGen:
             # 记住这个临时量指向哪个结构体，供 getmem/setmem 查布局
             self.struct_ptr_of[ins.dst] = _lay
             return
+        # 宽度必须和步长一致：int *p[3] 元素是指针（8 字节），
+        # 早期一律 mov eax（4 字节），读出来高 32 位是垃圾
+        # （实测 *p[0] 得到随机数而非变量地址）。
         if esz == 1:
             load_ins = "movzx eax, BYTE PTR"
+        elif esz == 8:
+            load_ins = "mov rax, QWORD PTR"
         else:
             load_ins = "mov eax, DWORD PTR"
         self.lea_base("rdx", base)
@@ -1320,7 +1389,13 @@ class FuncGen:
         else:
             self.load_operand("ecx", "rdx" if False else idx)
             self.line(f"{load_ins} [rdx+rcx*{esz}]")
-        self.store_reg(ins.dst)
+        if esz == 8:
+            # 指针元素：整个 64 位都是有效值
+            off = self.slot(ins.dst)
+            self.line(f"mov QWORD PTR [rbp-{off}], rax")
+            self.ptr_names.add(ins.dst)
+        else:
+            self.store_reg(ins.dst)
 
     def gen_addrof(self, ins):
         """&base[idx]：算元素地址，不读值。
@@ -1334,7 +1409,8 @@ class FuncGen:
         if not _is_name(base):
             raise CodegenError(
                 f"函数 {self.name}: addrof 的基址 '{base}' 无法识别")
-        if self.kinds.get(base) not in ("array", "ptr"):
+        if self.kinds.get(base) not in ("array", "ptr") \
+                and base not in getattr(self, "ptr_names", ()):
             raise CodegenError(
                 f"函数 {self.name}: 对非数组/非指针 '{base}' 取元素地址")
         ty = self.types.get(base)
@@ -1371,12 +1447,26 @@ class FuncGen:
         if not _is_name(base):
             raise CodegenError(
                 f"函数 {self.name}: store 的目标 '{base}' 无法识别")
-        if self.kinds.get(base) not in ("array", "ptr"):
+        # 指针写：base 是数组名、指针变量，或"返回指针的函数"的
+        # 返回值临时量（*at(1)=99 里的 t2）。后者不在 kinds 里
+        # （临时量不分配槽位类型），但一定在 ptr_names 里。
+        # 早期只查 kinds，*at(1)=99 直接报"对非数组做下标写"（实测）。
+        ok_base = (self.kinds.get(base) in ("array", "ptr")
+                   or base in getattr(self, "ptr_names", ()))
+        if not ok_base:
             raise CodegenError(
                 f"函数 {self.name}: 对非数组/非指针 '{base}' 做下标写")
         ty = self.types.get(base)
         esz = _elem_size(ty) if ty is not None else 4
-        width = "BYTE" if esz == 1 else "DWORD"
+        # 宽度必须和步长一致：int *p[3] 元素是指针（8 字节），
+        # 早期 width 一律 DWORD，地址按 8 步进但只写 4 字节，
+        # 高 4 字节留栈垃圾，读出来是随机地址（实测 *p[0] 得 559937664）。
+        if esz == 1:
+            width, valreg = "BYTE", "r8b"
+        elif esz == 8:
+            width, valreg = "QWORD", "r8"
+        else:
+            width, valreg = "DWORD", "r8d"
         self.lea_base("rdx", base)
         if _is_int_literal(idx):
             addr = f"[rdx+{int(idx) * esz}]"
@@ -1384,9 +1474,19 @@ class FuncGen:
             self.load_operand("ecx", idx)
             addr = f"[rdx+rcx*{esz}]"
         # 值先算到 eax，但地址用了 ecx；如果值依赖 ecx 会冲突，
-        # 所以先把值放进 r8d，再写内存。
+        # 所以先把值放进 r8，再写内存。
+        # 注意宽度匹配：char 数组存 1 字节，但 load_operand 加载
+        # 临时量时按 kinds 出 32/64 位。直接给 r8b 会生成
+        # "mov r8b, DWORD PTR" 这种宽度不一致的指令（汇编器报
+        # operand type mismatch，实测 char 数组动态写入全挂）。
+        # 解决：统一加载到 32 位 r8d，存储时按 esz 取对应宽度。
         self.load_operand("r8d", val)
-        self.line(f"mov {width} PTR {addr}, {'r8b' if esz == 1 else 'r8d'}")
+        if esz == 1:
+            self.line(f"mov BYTE PTR {addr}, r8b")
+        elif esz == 8:
+            self.line(f"mov QWORD PTR {addr}, r8")
+        else:
+            self.line(f"mov DWORD PTR {addr}, r8d")
 
 
 def split_args(s):
@@ -1475,6 +1575,24 @@ def generate_asm(prog, optimize=False, verbose=False):
     structs = collect_structs(prog)
     funcs, global_inits = split_functions(code)
 
+    # 找出"返回指针的函数"：函数体 return 的名字是 addr/addrof 的
+    # 产物（&x / &a[i]），或类型就是指针。
+    # 自定义的 int *at(int i){ return &g[i]; } 就要靠这个识别，
+    # 否则 *at(1)=99 会按 4 字节写指针（实测报"对非数组做下标写"）。
+    ptr_returning = set()
+    for fname, instrs in funcs:
+        addr_dsts = set()
+        for ins in instrs:
+            if ins.op in ("addr", "addrof") and ins.dst:
+                addr_dsts.add(ins.dst)
+        for ins in instrs:
+            if ins.op == "return" and ins.a1 and _is_name(ins.a1):
+                ty = types.get(ins.a1)
+                if (ty is not None and getattr(ty, "ptr", 0)) \
+                        or ins.a1 in addr_dsts:
+                    ptr_returning.add(fname)
+                    break
+
     # 全局变量：早期直接拒绝（"全局变量不进 IR，后端不支持"）。
     # 但 IR 侧早已把它们放进来了（global X: + 初始化指令），
     # 后端再拒绝就是自相矛盾。现在真的支持：进 .data / .bss 段。
@@ -1507,6 +1625,7 @@ def generate_asm(prog, optimize=False, verbose=False):
         fg._params = [p for p in _params_of(prog, name)]
         fg.global_names = global_names
         fg.structs = structs
+        fg.ptr_returning_funcs = ptr_returning
         fg.alloc()
         out.extend(fg.gen())
         # 收集本函数用到的字符串字面量（跨函数去重）
@@ -1564,19 +1683,40 @@ def gen_global_data(global_inits, types):
     """为全局变量生成 .data / .bss 段。
 
     global_inits: [(变量名, 初始化指令列表)]，来自 IR 的 global X: 段。
-    有初值的进 .data，没有的进 .bss（.comm）。
+    有初值的进 .data，没有的进 .bss（全零）。
 
-    简化处理：只看标量。数组全局（int a[10];）只能进 .bss 全零，
-    带初值的数组全局先不支持（CodegenError），绝不静默算错。
+    数组全局：
+    - 无初值 int a[10]; -> .bss 全零，大小 = 元素数 × 元素字节
+    - 带初值 int a[3]={7,8,9}; -> .data 逐元素 .long
+    早期直接报"不支持"，但全局数组是学生作业高频写法
+    （int g[100]; 这种统计表），对照测试实测必须支持。
     """
     data, bss = [], []
     for name, instrs in global_inits:
         label = re.sub(r'[^0-9A-Za-z_]', '_', name)
         ty = types.get(name)
         if _is_array(ty):
-            raise CodegenError(
-                f"全局数组 {name} 带布局的后端尚未支持"
-                f"（无元素类型与偏移信息，静默算错比报错更糟）")
+            total = _array_len(ty)
+            esz = _elem_size(ty) if ty is not None else 4
+            nbytes = max(total * esz, esz)
+            if not instrs:
+                bss.append((label, nbytes))
+                continue
+            # 逐元素收集：IR 里是 store extra=name a1=idx a2=val
+            vals = {}
+            for ins in instrs:
+                if ins.op == "store" and ins.extra == name:
+                    idx = ins.a1
+                    v = ins.a2
+                    if _is_int_literal(idx) and _is_int_literal(v):
+                        vals[int(idx)] = int(v)
+                    else:
+                        raise CodegenError(
+                            f"全局数组 {name} 的初值不是常量，后端不支持")
+            # 补零到 total
+            elems = [vals.get(i, 0) for i in range(total)]
+            data.append((label, elems, esz))
+            continue
         if not instrs:
             bss.append((label, 4))
             continue
@@ -1589,15 +1729,22 @@ def gen_global_data(global_inits, types):
         if val is None or not _is_int_literal(val):
             raise CodegenError(
                 f"全局变量 {name} 的初值不是整数常量，后端不支持")
-        data.append((label, val))
+        data.append((label, val, 4))
     out = []
     if data:
         out.append("\t.data")
-        for label, val in data:
+        for label, val, esz in data:
             out.append(f"\t.globl {label}")
             out.append(f"\t.align 4")
             out.append(f"{label}:")
-            out.append(f"\t.long {val}")
+            if isinstance(val, list):
+                # 数组：逐元素输出。char 数组用 .byte
+                if esz == 1:
+                    out.append("\t.byte " + ", ".join(str(v) for v in val))
+                else:
+                    out.append("\t.long " + ", ".join(str(v) for v in val))
+            else:
+                out.append(f"\t.long {val}")
     if bss:
         out.append("\t.bss")
         for label, nbytes in bss:
