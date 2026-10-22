@@ -130,11 +130,31 @@ def preprocess(src: str) -> PreResult:
 
         # ---- 条件编译 ----
         if name in ("if", "ifdef", "ifndef"):
-            # 只支持最简单的一种：头文件保护 #ifndef X / #define X / #endif
-            if name == "ifndef" and not rest:
-                cond_stack.append((False, name))
-            elif name in ("ifdef", "if") and not rest:
-                cond_stack.append((False, name))
+            # 头文件保护的标准三件套：
+            #   #ifndef STACK_H
+            #   #define STACK_H
+            #   ... 内容 ...
+            #   #endif
+            # 此时 X 未定义 -> 条件为真 -> **内容必须保留**。
+            # 早期只要 rest 非空就整体丢弃，于是所有带头文件保护的
+            # 代码整块消失（实测 stu_39：imax/imin 两个 static
+            # inline 函数直接没了，报"调用了未声明的函数"）。
+            if name == "ifndef":
+                if not rest:
+                    cond_stack.append((False, name))
+                elif rest in macros:
+                    # X 已定义 -> 条件为假 -> 跳过
+                    cond_stack.append((True, name))
+                else:
+                    # X 未定义 -> 条件为真 -> 保留
+                    cond_stack.append((False, name))
+            elif name == "ifdef":
+                if not rest:
+                    cond_stack.append((False, name))
+                elif rest in macros:
+                    cond_stack.append((False, name))   # 已定义 -> 保留
+                else:
+                    cond_stack.append((True, name))    # 未定义 -> 跳过
             else:
                 # 复杂条件：整体丢弃，并记录
                 cond_stack.append((True, name))

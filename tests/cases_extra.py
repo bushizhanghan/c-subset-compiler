@@ -1387,3 +1387,52 @@ int main(void) {
 }
 """, set()),
 ]
+
+
+# ---- 头文件保护 + static inline + 输出参数 ----
+# 来源：stu_39（多文件项目风格合成）。
+# #ifndef X / #define X / #endif 是头文件保护三件套，
+# 早期被当成"复杂条件编译"整块丢弃 —— 所有带头文件保护的代码消失。
+EXTRA_CASES += [
+    # 头文件保护里的内容必须保留
+    ("ok_header_guard", """
+#ifndef MYLIB_H
+#define MYLIB_H
+static inline int dbl(int x) { return x * 2; }
+#endif
+int main(void) { return dbl(21); }
+""", set()),
+
+    # ifdef 已定义的分支保留
+    ("ok_ifdef_defined", """
+#define FEATURE_A
+#ifdef FEATURE_A
+static int val = 10;
+#endif
+int main(void) { return val; }
+""", set()),
+
+    # 输出参数：&v 传给本文件函数后 v 算已初始化
+    ("ok_out_param_defined_fn", """
+static int read_it(int *out) { *out = 42; return 0; }
+int main(void) {
+    int v;
+    read_it(&v);
+    return v;
+}
+""", set()),
+
+    # restrict + _Bool 组合
+    ("ok_restrict_bool", """
+void copy_n(char *restrict d, const char *restrict s, int n) {
+    int i;
+    for (i = 0; i < n; i = i + 1) { d[i] = s[i]; }
+}
+int main(void) {
+    char buf[8];
+    _Bool ok = 1;
+    copy_n(buf, "abc", 4);
+    return ok ? buf[0] : 0;
+}
+""", set()),
+]

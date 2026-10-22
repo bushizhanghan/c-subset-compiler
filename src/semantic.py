@@ -3681,6 +3681,20 @@ class Analyzer:
                          f"但传了 {got} 个",
                          "对照函数定义检查调用")
         for i, a in enumerate(call.args):
+            # &x 作实参：函数可能通过指针写 x。
+            # 本文件函数同样可能（stack_pop(&st, &v)），
+            # 不标记 initialized 的话 E2 会对 v 误报
+            # "使用未初始化变量"（实测 stu_39，gcc 零诊断）。
+            # 外部函数那条路径早已这么处理，这是本文件函数的对应修复。
+            if isinstance(a, UnOp) and a.op == "&" \
+                    and isinstance(a.operand, Ident):
+                sym = self.scope.lookup(a.operand.name)
+                if sym is not None:
+                    sym.initialized = True
+                    if sym.vtype is not None and (
+                            sym.vtype.array is not None
+                            or sym.vtype.dims):
+                        sym.array_written = True
             at = self.check_expr(a)
             # 实参类型比对：个数对上了不代表类型对。
             # 参数个数不符时不再逐个比类型——那时候位置已经错位，
