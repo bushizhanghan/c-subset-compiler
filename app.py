@@ -30,6 +30,8 @@ def base_dir():
 
 BASE = base_dir()
 sys.path.insert(0, os.path.join(BASE, "src"))
+# 「运行」功能要用 tools/codegen.py，PyInstaller 解包目录下路径一致
+sys.path.insert(0, os.path.join(BASE, "tools"))
 
 from web import (Handler, MAX_SRC, check_text, get_ir,   # noqa: E402
                  PAGE)

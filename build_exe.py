@@ -6,7 +6,7 @@
 
 产物：
     dist/csub.exe          单文件，双击即用
-    csub-v1.0-win64.zip    连同说明文档的交付包
+    csub-v2.0-win64.zip    连同说明文档的交付包
 
 前置：
     pip install pyinstaller
@@ -25,7 +25,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
 DIST = os.path.join(ROOT, "dist")
-ZIP_NAME = "csub-v1.0-win64.zip"
+VERSION = "v2.0"
+ZIP_NAME = "csub-%s-win64.zip" % VERSION
 
 
 def run(cmd, **kw):
@@ -55,10 +56,14 @@ def main():
 
     # 3) 打包
     print("[2/4] 打包 exe（约 1 分钟）")
+    # src 是前端模块；tools/codegen.py 是「运行」功能的后端，
+    # 少打它 exe 里 /api/run 直接 ModuleNotFoundError（实测踩过）。
     cmd = [sys.executable, "-m", "PyInstaller",
            "--onefile",
            "--name", "csub",
            "--add-data", "src;src",
+           "--add-data", "tools;tools",
+           "--hidden-import", "codegen",
            "--console",
            "--noconfirm",
            "--clean",
