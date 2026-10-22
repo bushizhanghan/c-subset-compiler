@@ -1151,7 +1151,10 @@ class Analyzer:
             self.loop_depth += 1
             self.check_stmt(s.body)
             self.loop_depth -= 1
-            self.check_condition(s.cond, "while")
+            # do { ... } while(0) 是宏包裹的标准惯用法，
+            # 恒假是故意的，不报 W5（实测 stu_28 的 do-while(0)）。
+            if not (isinstance(s.cond, Num) and s.cond.value == 0):
+                self.check_condition(s.cond, "while")
         elif isinstance(s, Switch):
             self.check_expr(s.expr)
             # switch 里 break 合法，所以按"循环"处理 break 的深度计数
@@ -3528,6 +3531,26 @@ class Analyzer:
                         sym = self.scope.lookup(a.operand.name)
                         if sym:
                             sym.initialized = True
+                            # 数组变量的地址传给未知函数：函数可能
+                            # 填充整个数组（MD5Final(&md5, decrypt)）。
+                            # 不标记 array_written，W21 会对后续读取
+                            # 误报"从未被赋值"（实测 stu_28 两条）。
+                            if sym.vtype is not None and (
+                                    sym.vtype.array is not None
+                                    or sym.vtype.dims):
+                                sym.array_written = True
+                    elif isinstance(a, Ident):
+                        # 数组名直接传给未知函数（不经 &，数组自动退化）：
+                        # 同样可能被填充。同上，不标记就是 W21 误报。
+                        sym = self.scope.lookup(a.name)
+                        if sym is not None and sym.vtype is not None and (
+                                sym.vtype.array is not None
+                                or sym.vtype.dims):
+                            self.check_lvalue(a)
+                            sym.initialized = True
+                            sym.array_written = True
+                            continue
+                        self.check_expr(a)
                     else:
                         self.check_expr(a)
                 # 看不到声明就不知道它返回什么，必须老实返回"未知"。
