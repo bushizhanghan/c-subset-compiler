@@ -1145,6 +1145,16 @@ class Analyzer:
             # 这样重复声明、未使用等检查都自动生效。
             for vd in s.decls:
                 self.check_vardecl(vd)
+        elif isinstance(s, StructDef):
+            # 函数内 typedef struct/union {...} Name;
+            # 登记类型名和成员，否则后面的 Name x; 会被当成
+            # "未声明变量"（实测 stu_33 的函数内 typedef union）。
+            if s.tag:
+                self.structs[s.tag] = s
+            for alias, ty in s.typedefs:
+                self.typedefs[alias] = ty
+                if not s.tag and s.members and not ty.ptr:
+                    self.structs[alias] = s
         elif isinstance(s, Block):
             self.check_block(s)
         elif isinstance(s, VarDecl):

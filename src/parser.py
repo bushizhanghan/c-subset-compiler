@@ -715,6 +715,36 @@ class Parser:
 
     def parse_typedef(self):
         kw = self.advance()          # typedef
+        # typedef union { ... } U;
+        # union 的成员重叠存储，但语法层和 struct 完全一样
+        # （都是 { 成员... } + 别名列表），复用同一分支。
+        # 学生作业里函数内 typedef union 常见（stu_33）。
+        if self.cur.kind == Tok.KW and self.cur.value == "union":
+            self.advance()
+            tag = ""
+            if self.at_kind(Tok.IDENT):
+                tag = self.advance().value
+            members = []
+            if self.at("{"):
+                members = self._parse_struct_body()
+            sd = StructDef(line=kw.line, col=kw.col, tag=tag, members=members)
+            sd.is_union = True
+            while True:
+                ptr = 0
+                while self.at("*"):
+                    self.advance()
+                    ptr += 1
+                alias = self.expect_kind(Tok.IDENT, "类型别名").value
+                self.known_types.add(alias)
+                sd.typedefs.append(
+                    (alias, Type(base="union " + tag if tag else "union",
+                                 ptr=ptr)))
+                if self.at(","):
+                    self.advance()
+                    continue
+                break
+            self.expect(";")
+            return sd
         # typedef enum { ... } Status;
         # 枚举成员是 int 常量，登记到 enum_consts 供语义层查
         if self.cur.kind == Tok.KW and self.cur.value == "enum":
@@ -1156,6 +1186,16 @@ class Parser:
 
     def _parse_stmt_inner(self):
         t = self.cur
+
+        # 函数内 typedef：typedef int myint; / typedef struct {...} Pos;
+        # 学生作业里在函数内定义结构体很常见（bhagavansprasad/students
+        # 的 union.c 就是这么写的）。早期完全不支持，
+        # 报"无法解析的表达式起始 'typedef'"。
+        if t.kind == Tok.KW and t.value == "typedef":
+            sd = self.parse_typedef()
+            # parse_typedef 返回 StructDef（含 typedefs 列表）；
+            # 语句层直接返回它，语义层会登记类型名。
+            return sd
 
         # goto 标签：标识符后面紧跟冒号。
         # 注意 peek(k=1) 表示"往后第 k 个"，peek() 即下一个 token，
