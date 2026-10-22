@@ -89,29 +89,37 @@ def main():
          {"sha": commit["sha"]}, token)
     print("已更新 main -> " + commit["sha"][:7])
 
-    # 打 tag（annotated tag）
-    tag_tgt = call("POST", "/repos/%s/%s/git/tags" % (OWNER, REPO),
-                   {"tag": "v1.0",
-                    "message": "csub v1.0\n\n"
-                               "42 份真实学生代码验证：零崩溃、零误报。\n"
-                               "39 条诊断规则，六套验证全绿。\n\n"
-                               "能力边界：docs/CAPABILITY_BOUNDARY.md\n"
-                               "已知限制：docs/KNOWN_LIMITATIONS.md\n"
-                               "使用手册：docs/USAGE.md\n\n"
-                               "21% 检出率是静态分析的真实上限，"
-                               "不是实现不完整。",
-                    "object": commit["sha"], "type": "commit"}, token)
-    try:
-        call("POST", "/repos/%s/%s/git/refs" % (OWNER, REPO),
-             {"ref": "refs/tags/v1.0", "sha": tag_tgt["sha"]}, token)
-        print("已创建 tag v1.0")
-    except SystemExit as e:
-        if "422" in str(e):
-            call("PATCH", "/repos/%s/%s/git/refs/tags/v1.0" % (OWNER, REPO),
-                 {"sha": tag_tgt["sha"]}, token)
-            print("已更新 tag v1.0")
-        else:
-            print("tag 失败: %s" % e)
+    # 同步本地所有 tag。早期硬编码只推 v1.0，打 v2.0 后
+    # 远端永远看不到（实测踩到）。
+    local_tags = git("tag", "-l").splitlines()
+    for tag in local_tags:
+        if not tag.strip():
+            continue
+        msg = git("tag", "-l", tag, "--format=%(contents)")
+        try:
+            tag_tgt = call("POST", "/repos/%s/%s/git/tags" % (OWNER, REPO),
+                           {"tag": tag, "message": msg or tag,
+                            "object": commit["sha"], "type": "commit"},
+                           token)
+        except SystemExit as e:
+            if "422" not in str(e):
+                print("tag %s 失败: %s" % (tag, e))
+                continue
+            # tag 对象已存在：拿现有引用的 sha
+            existing = call("GET", "/repos/%s/%s/git/refs/tags/%s"
+                            % (OWNER, REPO, tag), None, token)
+            tag_tgt = {"sha": existing["object"]["sha"]}
+        try:
+            call("POST", "/repos/%s/%s/git/refs" % (OWNER, REPO),
+                 {"ref": "refs/tags/%s" % tag, "sha": tag_tgt["sha"]}, token)
+            print("已创建 tag %s" % tag)
+        except SystemExit as e:
+            if "422" in str(e):
+                call("PATCH", "/repos/%s/%s/git/refs/tags/%s"
+                     % (OWNER, REPO, tag), {"sha": tag_tgt["sha"]}, token)
+                print("已更新 tag %s" % tag)
+            else:
+                print("tag %s 失败: %s" % (tag, e))
 
 
 if __name__ == "__main__":
