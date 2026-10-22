@@ -686,6 +686,68 @@ class Parser:
                 # 回退后掉进无条件 expect，所有成员全炸
                 # （void** arr; 也报"期望函数指针成员名"）。
                 self.i = _save
+            # 内嵌类型成员：struct {...} x; / union {...}; / enum {...} name;
+            # 只处理**带花括号体**的形态（匿名或命名嵌套类型）。
+            # `struct listint_s *next;` 这种带 tag 但**无花括号**的是
+            # 普通成员（自引用指针），必须放给 parse_type 处理 ——
+            # 早期没这个判断，next 被记成 int，W11 误报三条
+            # （实测 stu_30 回归，之前是零诊断的）。
+            if self.cur.kind == Tok.KW and self.cur.value in (
+                    "struct", "union", "enum") \
+                    and (self.peek().value == "{"
+                         or (self.peek().kind == Tok.IDENT
+                             and self.peek(2).value == "{")):
+                self.advance()
+                tag = ""
+                if self.at_kind(Tok.IDENT) and not self.at("{"):
+                    tag = self.advance().value
+                if self.at("{"):
+                    # 吃掉 {...}，同时收集内层成员名。
+                    # C11 匿名结构体/联合体的语义：内层成员直接
+                    # 提升到外层，s.x 等价于 s.<anon>.x。
+                    # 早期直接忽略内层，导致 s.x 报"没有成员"
+                    # （实测 stu_37，gcc 零诊断）。
+                    depth = 1
+                    self.advance()
+                    inner_names = []
+                    expect_name = True
+                    while depth > 0 and not self.at_kind(Tok.EOF):
+                        if self.at("{"):
+                            depth += 1
+                            self.advance()
+                            continue
+                        if self.at("}"):
+                            depth -= 1
+                            self.advance()
+                            continue
+                        if self.at(";") or self.at(","):
+                            # 分号结束一条声明，逗号串起同类型下一个成员
+                            # （int x, y, r; 里 y/r 也是成员名）
+                            expect_name = True
+                            self.advance()
+                            continue
+                        if expect_name and self.at_kind(Tok.IDENT):
+                            inner_names.append(self.cur.value)
+                            expect_name = False
+                        self.advance()
+                    for nm in inner_names:
+                        members.append((Type(base="int"), nm))
+                # 声明列表（可能多个变量或匿名）
+                while True:
+                    while self.at("*"):
+                        self.advance()
+                    if self.at(";"):
+                        break            # 完全匿名，无变量名
+                    if not self.at_kind(Tok.IDENT):
+                        break
+                    mname = self.advance().value
+                    members.append((Type(base="int"), mname))
+                    if self.at(","):
+                        self.advance()
+                        continue
+                    break
+                self.expect(";")
+                continue
             mty = self.parse_type()
             if mty is None:
                 t = self.cur
@@ -698,6 +760,17 @@ class Parser:
                     self.advance()
                 mname = self.expect_kind(Tok.IDENT, "成员名").value
                 m2 = mty
+                # 位字段：unsigned int visible : 1;
+                # 冒号后是位数。C 标准语法，硬件寄存器封装极常见。
+                # 早期不认，报"期望 ';'，实际是 ':'"（实测 stu_37，
+                # gcc 零诊断）。位数不影响类型推导，直接吃掉。
+                if self.at(":"):
+                    self.advance()
+                    if self.at_kind(Tok.NUM):
+                        self.advance()
+                    elif self.at_kind(Tok.IDENT):
+                        self.advance()      # 位数是宏
+                    # 负数位数不合法，但宽度记录没用到，容忍
                 if self.at("["):
                     self.advance()
                     # 数组长度可能是来自头文件的宏（MAX_PATH 等），

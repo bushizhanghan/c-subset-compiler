@@ -1310,3 +1310,80 @@ int main() {
 }
 """, set()),
 ]
+
+
+# ---- 位字段 + 匿名结构体/联合体 + sizeof 惯用法 ----
+# 来源：stu_37（构造样本，覆盖三类语法）。
+# 位字段、匿名嵌套、sizeof 计数组长度都是真实代码常见写法，
+# 早期全部报 SYN 或误报。
+EXTRA_CASES += [
+    # 位字段
+    ("ok_bitfield", """
+struct Flags {
+    unsigned int visible : 1;
+    unsigned int priority : 3;
+};
+int main(void) {
+    struct Flags f;
+    f.visible = 1;
+    f.priority = 5;
+    return f.priority;
+}
+""", set()),
+
+    # 匿名 union + 匿名 struct（C11 成员提升）
+    ("ok_anon_union", """
+struct Shape {
+    int kind;
+    union {
+        struct { int x, y, r; };
+        struct { int x1, y1, x2, y2; };
+    };
+};
+int main(void) {
+    struct Shape s;
+    s.kind = 0;
+    s.x = 1;
+    s.y = 2;
+    s.r = 3;
+    return s.r;
+}
+""", set()),
+
+    # 结构体内 enum 判别式
+    ("ok_enum_in_struct", """
+struct Node {
+    enum { LEAF, BRANCH } kind;
+    int value;
+};
+int main(void) {
+    struct Node n;
+    n.kind = LEAF;
+    n.value = 42;
+    return n.value;
+}
+""", set()),
+
+    # sizeof 算数组长度（ARRAY_SIZE 惯用法）
+    ("ok_sizeof_array_len", """
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+int main(void) {
+    int arr[10];
+    return (int)ARRAY_SIZE(arr);
+}
+""", set()),
+
+    # 反向：自引用结构体指针成员不能被当成 int
+    ("ok_selfref_struct", """
+typedef struct listint_s {
+    int n;
+    struct listint_s *next;
+} listint_t;
+int main(void) {
+    listint_t a, b;
+    a.next = &b;
+    b.next = 0;
+    return a.next->n;
+}
+""", set()),
+]

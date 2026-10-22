@@ -1589,6 +1589,10 @@ class Analyzer:
                     e.size_value = sz
                 except Exception:
                     pass
+                # sizeof(arr) 里的 arr 算"被使用"——gcc 不报
+                # unused，W6 也不该报（实测 stu_37 的
+                # ARRAY_SIZE(arr) 被误报）。
+                self._mark_used_in(e.operand)
                 return VT("int")
             t = self.check_expr(e.operand)
             if e.op in ("!",):
@@ -3378,6 +3382,32 @@ class Analyzer:
                           f"{fname} 的 %{spec} 需要 "
                           f"{'/'.join(sorted(want))}，实际传的是 {base}",
                           hint)
+
+    def _mark_used_in(self, node, _depth=0):
+        """递归标记表达式里所有标识符为 used，不产生任何诊断。
+
+        用于 sizeof(arr) / (void)&x 这类"用了变量但不读值"的场景。
+        早期 sizeof 只算尺寸不走 check_expr，operand 里的变量
+        used 一直是 False，W6 误报"声明后从未使用"
+        （实测 stu_37 的 ARRAY_SIZE(arr)，gcc 零警告）。
+        """
+        if node is None or _depth > 40:
+            return
+        if isinstance(node, Ident):
+            sym = self.scope.lookup(node.name)
+            if sym is not None:
+                sym.used = True
+            return
+        for attr in ("operand", "left", "right", "base", "idx",
+                     "cond", "then", "els", "value", "target"):
+            c = getattr(node, attr, None)
+            if c is not None:
+                self._mark_used_in(c, _depth + 1)
+        for attr in ("args", "stmts"):
+            c = getattr(node, attr, None)
+            if isinstance(c, list):
+                for x in c:
+                    self._mark_used_in(x, _depth + 1)
 
     def _vt_silent(self, node):
         """静默推表达式的 VT，不产生诊断（W23 用）。
