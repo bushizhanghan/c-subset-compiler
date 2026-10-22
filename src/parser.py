@@ -581,6 +581,18 @@ class Parser:
                  and self.peek(2).value == "{")):
             return self.parse_struct_only()
 
+        # 顶层函数指针声明：int (*ops[3])(int, int) = {...};
+        # 必须放在 parse_type() 之前 —— parse_type 会把 int 吃掉，
+        # 之后的 (*name) 就只剩 '(' 开头，什么都认不出来
+        # （实测 stu_36，第一版放错位置静默失效）。
+        fp = self._try_parse_fnptr_decl()
+        if fp is not None:
+            fty, fname = fp
+            return self.parse_decl_group(
+                fty, fname, Token(Tok.IDENT, fname,
+                                  self.toks[self.i].line,
+                                  self.toks[self.i].col))
+
         ty = self.parse_type()
         if ty is None:
             # typedef 出来的类型名（Node / LinkList）在语法层就是 IDENT。
@@ -1009,9 +1021,16 @@ class Parser:
         name = self.advance().value
         extra = 0
         # char *argv[] 里的 [] ：数组形参等价于指针，丢掉维度
-        while self.at("[") and self.peek().value == "]":
-            self.advance()
-            self.advance()
+        # int g[][3] 里的 [][3]：第一维空（退化），后续维带长度。
+        # 早期只认空 []，遇到 [3] 判定失败，二维数组参数直接报
+        # "期望 ')'，实际是 '['"（实测 stu_36 的
+        # int sum_grid(int g[][3], int rows)，gcc 零诊断）。
+        while self.at("["):
+            self.advance()                       # [
+            # 吃掉维度内容（空 / 数字 / 表达式），数组形参全部退化成指针
+            if not self.at("]"):
+                self.parse_expr()
+            self.expect("]")
             extra += 1          # 数组退化也等效于加一层指针
         return (name, extra)
 
@@ -1094,6 +1113,61 @@ class Parser:
         return group
 
     # ---- 语句 ----
+    def _try_parse_fnptr_decl(self):
+        """识别函数指针声明：int (*f)(int, int) 或 int (*ops[3])(int, int)。
+
+        这是"回调表"的标准写法，C 代码里极常见：
+            int (*ops[3])(int, int) = {op_add, op_sub, op_mul};
+
+        早期 parse_local_type 不认识 (*name) 形态，
+        报"期望 标识符，实际是 '('"（实测 stu_36）。
+
+        记成 ptr=1 的 int 指针类型（诊断够用，不建真正的
+        函数指针类型）；数组维度记在 array 上。
+        返回 (Type, name) 或 None（位置不动）。
+        """
+        if self.cur.kind != Tok.KW:
+            return None
+        save = self.i
+        base = self.advance().value          # int / char / void / float ...
+        while self.at("*"):
+            self.advance()
+        if not (self.at("(") and self.peek().value == "*"):
+            self.i = save
+            return None
+        self.advance()                       # (
+        self.advance()                       # *
+        if not self.at_kind(Tok.IDENT):
+            self.i = save
+            return None
+        name = self.advance().value
+        dim = None
+        if self.at("["):
+            self.advance()
+            if self.at_kind(Tok.NUM):
+                dim = _safe_int(self.advance().value, 10)
+            self.expect("]")
+        if not self.at(")"):
+            self.i = save
+            return None
+        self.advance()                       # )
+        # 参数列表：吃掉匹配的括号
+        if not self.at("("):
+            self.i = save
+            return None
+        self.advance()                       # (
+        depth = 1
+        while depth > 0 and not self.at_kind(Tok.EOF):
+            if self.at("("):
+                depth += 1
+            elif self.at(")"):
+                depth -= 1
+            self.advance()
+        ty = Type(base=base, ptr=1)
+        if dim:
+            ty.array = dim
+        return (ty, name)
+
     def parse_local_type(self):
         """局部声明里的类型：内置类型，或 typedef 出来的名字。
 
@@ -1209,6 +1283,14 @@ class Parser:
 
         if self.at("{"):
             return self.parse_block()
+
+        # 函数指针声明：int (*f)(int, int) / int (*ops[3])(int, int);
+        # 必须放在 parse_local_type 之前 —— 后者的 (*name) 不认识。
+        fp = self._try_parse_fnptr_decl()
+        if fp is not None:
+            fty, fname = fp
+            return self.parse_decl_group(fty, fname,
+                                         Token(Tok.IDENT, fname, t.line, t.col))
 
         ty = self.parse_local_type()
         if ty is not None:
