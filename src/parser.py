@@ -1473,6 +1473,23 @@ class Parser:
                         self.advance()          # 字段名
                         self.advance()          # =
                         items.append(self.parse_assign())
+                    elif self.at("[") and self.peek().kind == Tok.NUM:
+                        # [index] = value：C99 数组指定初始化器
+                        # int sparse[5] = {[0]=10, [2]=30, [4]=50};
+                        # 早期只支持 .field，数组版直接报
+                        # "无法解析的表达式起始 '['"（实测 stu_35，
+                        # gcc 零诊断）。
+                        self.advance()          # [
+                        idx_tok = self.advance()  # 索引
+                        self.expect("]")
+                        if self.at("="):
+                            self.advance()
+                            items.append(self.parse_assign())
+                        else:
+                            items.append(Num(line=idx_tok.line,
+                                             col=idx_tok.col,
+                                             value=_safe_int(idx_tok.value,
+                                                             10)))
                     else:
                         items.append(self.parse_assign())
                     if self.at(","):
