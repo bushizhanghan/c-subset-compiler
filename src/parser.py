@@ -1751,6 +1751,11 @@ class Parser:
     def try_parse_cast_type(self):
         """尝试解析一个类型名，失败则返回 None（不回退位置，由调用方处理）。"""
         start = self.i
+        # 开头可有 const/volatile/restrict：(const char *)x
+        while (self.cur.kind == Tok.KW
+               and self.cur.value in ("const", "volatile", "restrict",
+                                      "_Atomic")):
+            self.advance()
         if (self.cur.kind == Tok.KW
                 and self.cur.value in ("int", "float", "char", "double",
                                        "void", "signed", "unsigned",
@@ -1775,6 +1780,14 @@ class Parser:
             while self.at("*"):
                 self.advance()
                 ptr += 1
+                # 星号后可带限定符：char *const *p 是标准写法
+                # （指向"常量 char 指针"的指针）。早期不认，
+                # (const char *const *)words 直接报
+                # "无法解析的表达式起始 'const'"（实测 stu_41）。
+                while (self.cur.kind == Tok.KW
+                       and self.cur.value in ("const", "volatile",
+                                              "restrict", "_Atomic")):
+                    self.advance()
             # 记录真实的基础类型和浮点标记。
             # 早期这里无条件返回 Type(base="int")，导致
             # (float)j/(float)m 被当成 int/int —— W3 对
@@ -1794,6 +1807,11 @@ class Parser:
                 self.advance()
             while self.at("*"):
                 self.advance()
+                while (self.cur.kind == Tok.KW
+                       and self.cur.value in ("const", "volatile",
+                                              "restrict", "_Atomic")):
+                    self.advance()
+                self.advance()
             return Type(base="struct")
         if self.at_kind(Tok.IDENT):
             name = self.advance().value
@@ -1801,6 +1819,10 @@ class Parser:
             while self.at("*"):
                 self.advance()
                 ptr += 1
+                while (self.cur.kind == Tok.KW
+                       and self.cur.value in ("const", "volatile",
+                                              "restrict", "_Atomic")):
+                    self.advance()
             # 判定是否类型转换，按可信度依次判断：
             # 1) 是已见过的变量 -> 绝不是类型，回退（(*(init))() 就靠这条）；
             # 2) 是已登记的 typedef 或内置类型名 -> 是转换；
