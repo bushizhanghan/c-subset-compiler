@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """csub 网页版 —— 粘贴代码，看诊断。
 
@@ -596,13 +596,18 @@ main{
 
 .gutter{
   flex-shrink:0;width:60px;padding:16px 0;
-  overflow:hidden;user-select:none;
+  /* overflow 必须是可编程滚动的状态：hidden 时 JS 赋
+     scrollTop 静默失败，行号不跟随代码滚动（实测）。
+     auto + 隐藏滚动条 = 能编程滚动又看不见滚动条。 */
+  overflow:auto;user-select:none;
+  scrollbar-width:none;-ms-overflow-style:none;
   font:12.5px/1.78 var(--mono);text-align:right;
   color:#78829c;
   background:linear-gradient(180deg,
     rgb(10 12 20 / .55), rgb(10 12 20 / .35));
   border-right:1px solid var(--line);
 }
+.gutter::-webkit-scrollbar{display:none}
 .gutter .gl{
   padding-right:12px;border-right:2px solid transparent;
   transition:.14s;
@@ -624,9 +629,18 @@ main{
 .code-wrap .hl{
   position:absolute;inset:0;padding:16px 18px;
   font:12.5px/1.78 var(--mono);tab-size:4;
-  white-space:pre;overflow:hidden;pointer-events:none;
-  color:var(--text);word-break:break-all;
+  /* overflow 必须是 auto/hidden 之外的"可编程滚动"状态：
+     设成 hidden 时 JS 赋 scrollLeft 静默失败，textarea 横向
+     滚动后高亮层不跟随，文字整体偏掉（实测竖杠对不上）。
+     auto + 隐藏滚动条 = 既能编程滚动又看不见滚动条。 */
+  white-space:pre;overflow:auto;pointer-events:none;
+  color:var(--text);
+  scrollbar-width:none;-ms-overflow-style:none;
+  /* 不能加 word-break:break-all：textarea 关了软换行后按
+     pre 不折行，这里若还按字符断行，行超宽时两层文字会错开，
+     光标竖杠指向错误位置（实测对不上）。两层都必须不折行。 */
 }
+.code-wrap .hl::-webkit-scrollbar{display:none}
 /* 语法配色：更鲜艳 */
 .code-wrap .hl .c{color:#6b7a99;font-style:italic}
 .code-wrap .hl .s{color:#7ee787}
@@ -639,13 +653,20 @@ main{
 /* 代码编辑区专用：文字透明（底下有语法高亮层）。
    必须限定 #code——通用 textarea 选择器会命中 stdin 输入框，
    -webkit-text-fill-color 优先级高于 color，导致输入的文字
-   全透明看不见（实测踩坑）。 */
+   全透明看不见（实测踩坑）。
+
+   white-space:pre + wrap=off：不软换行，和 .hl 层的断行行为
+   保持一致。textarea 默认 soft wrap 按词边界断行，.hl 是
+   word-break:break-all 按字符断——一旦行超宽，两层的文字
+   就逐行错开，光标竖杠指向的字符和实际输入位置对不上
+   （实测：输入到第 40 列后竖杠偏 2-3 个字符）。 */
 #code{
   position:relative;z-index:1;width:100%;height:100%;
   padding:16px 18px;
   background:transparent;color:transparent;
   border:0;outline:0;resize:none;
   font:12.5px/1.78 var(--mono);tab-size:4;
+  white-space:pre;overflow:auto;
   caret-color:var(--c-cyan);
   -webkit-text-fill-color:transparent;
   scrollbar-width:thin;
@@ -1124,7 +1145,7 @@ footer b{
     <div class="mark"><span>&lt;/&gt;</span></div>
     <div class="title-wrap">
       <div class="title">csub 诊断台</div>
-      <div class="subtitle">C SUBSET COMPILER · v2.2.0</div>
+      <div class="subtitle">C SUBSET COMPILER · v2.2.1</div>
     </div>
   </div>
   <div class="spacer"></div>
@@ -1168,7 +1189,7 @@ footer b{
       <div class="code-wrap">
         <pre class="hl" id="hl" aria-hidden="true"></pre>
         <textarea id="code" spellcheck="false" autocomplete="off"
-          autocapitalize="off" autofocus
+          autocapitalize="off" autofocus wrap="off"
           placeholder="在此粘贴 C 代码&#10;&#10;支持 #include / 宏 / 结构体 / 指针 / 递归&#10;&#10;Ctrl + Enter  检查"></textarea>
       </div>
     </div>
@@ -1327,9 +1348,12 @@ function hlLine(line) {
 }
 
 function renderHighlight() {
+  // 先记下滚动位置：innerHTML 重设会把 .hl 的 scrollLeft 归零，
+  // 用户横向滚动到一半时输入，文字会跳回最左（实测错位加剧）。
+  const sl = hl.scrollLeft, st = hl.scrollTop;
   hl.innerHTML = code.value.split('\n').map(hlLine).join('\n');
-  hl.scrollTop = code.scrollTop;
-  hl.scrollLeft = code.scrollLeft;
+  hl.scrollLeft = sl;
+  hl.scrollTop = st;
 }
 
 /* ═══ 行号 ═══ */
@@ -1537,6 +1561,7 @@ function jumpTo(line) {
   code.scrollTop = Math.max(0, (line - 7) * 22.2);
   gutter.scrollTop = code.scrollTop;
   hl.scrollTop = code.scrollTop;
+  hl.scrollLeft = code.scrollLeft;
 }
 
 /* ═══ IR ═══ */
