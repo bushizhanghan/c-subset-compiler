@@ -629,16 +629,18 @@ main{
 .code-wrap .hl{
   position:absolute;inset:0;padding:16px 18px;
   font:12.5px/1.78 var(--mono);tab-size:4;
-  /* overflow 必须是 auto/hidden 之外的"可编程滚动"状态：
-     设成 hidden 时 JS 赋 scrollLeft 静默失败，textarea 横向
-     滚动后高亮层不跟随，文字整体偏掉（实测竖杠对不上）。
-     auto + 隐藏滚动条 = 既能编程滚动又看不见滚动条。 */
-  white-space:pre;overflow:auto;pointer-events:none;
+  /* overflow 必须是可编程滚动的状态：hidden 时 JS 赋
+     scrollLeft/scrollTop 静默失败，代码滚动后高亮层不跟随，
+     文字整体偏掉（实测竖杠对不上）。
+     auto + 隐藏滚动条 = 能编程滚动又看不见滚动条。 */
+  /* 折行规则必须和 #code 逐字节一致（pre-wrap + break-all），
+     否则两层在不同列折行，文字逐行错开、光标偏离。
+     曾经这里用 white-space:pre（不折行）配 wrap="off" 的
+     textarea，结果点击定位失效——光标只能落到行首。 */
+  white-space:pre-wrap;word-break:break-all;overflow-wrap:anywhere;
+  overflow:auto;pointer-events:none;
   color:var(--text);
   scrollbar-width:none;-ms-overflow-style:none;
-  /* 不能加 word-break:break-all：textarea 关了软换行后按
-     pre 不折行，这里若还按字符断行，行超宽时两层文字会错开，
-     光标竖杠指向错误位置（实测对不上）。两层都必须不折行。 */
 }
 .code-wrap .hl::-webkit-scrollbar{display:none}
 /* 语法配色：更鲜艳 */
@@ -655,18 +657,20 @@ main{
    -webkit-text-fill-color 优先级高于 color，导致输入的文字
    全透明看不见（实测踩坑）。
 
-   white-space:pre + wrap=off：不软换行，和 .hl 层的断行行为
-   保持一致。textarea 默认 soft wrap 按词边界断行，.hl 是
-   word-break:break-all 按字符断——一旦行超宽，两层的文字
-   就逐行错开，光标竖杠指向的字符和实际输入位置对不上
-   （实测：输入到第 40 列后竖杠偏 2-3 个字符）。 */
+   折行策略必须和 .hl 层**逐字节一致**：
+   white-space:pre-wrap + word-break:break-all + overflow-wrap:anywhere。
+   曾经试过 wrap="off"（不折行横向滚动），但 textarea 的
+   wrap=off 会让浏览器自带的"点击定位光标"失效——点单词中间
+   光标只会落到行首（实测）。所以改回软换行，两层用同一套
+   断行规则，折行点就一致，光标不会偏。 */
 #code{
   position:relative;z-index:1;width:100%;height:100%;
   padding:16px 18px;
   background:transparent;color:transparent;
   border:0;outline:0;resize:none;
   font:12.5px/1.78 var(--mono);tab-size:4;
-  white-space:pre;overflow:auto;
+  white-space:pre-wrap;word-break:break-all;overflow-wrap:anywhere;
+  overflow:auto;
   caret-color:var(--c-cyan);
   -webkit-text-fill-color:transparent;
   scrollbar-width:thin;
@@ -1145,7 +1149,7 @@ footer b{
     <div class="mark"><span>&lt;/&gt;</span></div>
     <div class="title-wrap">
       <div class="title">csub 诊断台</div>
-      <div class="subtitle">C SUBSET COMPILER · v2.2.1</div>
+      <div class="subtitle">C SUBSET COMPILER · v2.2.2</div>
     </div>
   </div>
   <div class="spacer"></div>
@@ -1189,7 +1193,7 @@ footer b{
       <div class="code-wrap">
         <pre class="hl" id="hl" aria-hidden="true"></pre>
         <textarea id="code" spellcheck="false" autocomplete="off"
-          autocapitalize="off" autofocus wrap="off"
+          autocapitalize="off" autofocus
           placeholder="在此粘贴 C 代码&#10;&#10;支持 #include / 宏 / 结构体 / 指针 / 递归&#10;&#10;Ctrl + Enter  检查"></textarea>
       </div>
     </div>
@@ -1348,11 +1352,10 @@ function hlLine(line) {
 }
 
 function renderHighlight() {
-  // 先记下滚动位置：innerHTML 重设会把 .hl 的 scrollLeft 归零，
-  // 用户横向滚动到一半时输入，文字会跳回最左（实测错位加剧）。
-  const sl = hl.scrollLeft, st = hl.scrollTop;
+  // 先记下滚动位置：innerHTML 重设会把 .hl 的 scrollTop 归零，
+  // 用户滚动到一半时输入，文字会跳回顶部（实测错位加剧）。
+  const st = hl.scrollTop;
   hl.innerHTML = code.value.split('\n').map(hlLine).join('\n');
-  hl.scrollLeft = sl;
   hl.scrollTop = st;
 }
 
