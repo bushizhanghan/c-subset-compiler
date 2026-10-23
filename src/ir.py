@@ -147,6 +147,16 @@ class IRGen:
                     self.gen_vardecl(vd)
         for d in prog.decls:
             if isinstance(d, FuncDef) and d.body is not None:
+                # 形参的维度也要登记：int f(int a[][3]) 的 a 退化成
+                # int(*)[3]，dims=[3] 是行宽。不登记的话 _flatten_index
+                # 拍平不了，二维数组参数访问错位（实测 sum2 得 18 而非 21）。
+                for p in d.params:
+                    if isinstance(p, (tuple, list)) and len(p) == 2:
+                        ty, pn = p
+                        pn = getattr(pn, "name", pn)
+                        pd = getattr(ty, "dims", None)
+                        if pn and pd:
+                            self.dims[pn] = list(pd)
                 self.emit("label", extra=f"func {d.name}")
                 self.gen_block(d.body, new_scope=False)
                 self.emit("label", extra=f"end func {d.name}")
@@ -301,8 +311,15 @@ class IRGen:
         self.loop_stack.pop()
         self.emit("label", extra=lend)
     def gen_vardecl(self, vd: VarDecl):
-        # 记录数组维度，供嵌套下标拍平用
-        dims = getattr(vd.vtype, "dims", None) or getattr(vd.vtype, "array", None)
+        # 记录数组维度，供嵌套下标拍平用。
+        # 防御：函数指针数组 int (*ops[2])(int,int) 的 dims 可能是
+        # 标量而非 list（parser 对函数指针维度的表示不同），
+        # 直接 len() 会 TypeError（实测）。
+        dims = getattr(vd.vtype, "dims", None)
+        if isinstance(dims, int):
+            dims = [dims]
+        elif not isinstance(dims, (list, tuple)):
+            dims = None
         if dims and len(dims) > 1:
             self.dims[vd.name] = list(dims)
         # 初始化列表：int a[3] = {1,2,3};
@@ -371,7 +388,30 @@ class IRGen:
         base_name = node.name
         indices.reverse()
         dims = self.dims.get(base_name)
-        if not dims or len(dims) != len(indices):
+        if not dims:
+            return None
+        # 两种形态：
+        #   局部 int a[2][3]   dims=[2,3]，索引 2 个 -> i*3+j
+        #   形参 int a[][3]    dims=[3]（退化后只剩行宽），索引 2 个
+        #     -> 第一维无界，行宽就是 dims[0]，公式 i*dims[0]+j
+        # 统一按"最后一个维度是行宽"处理：前面的索引依次乘后续维度。
+        if len(indices) < 1:
+            return None
+        if len(dims) != len(indices):
+            # 形参退化：dims 比索引少 1（第一维空）。
+            # 用 dims[0] 当行宽，前面索引都乘它。
+            if len(dims) == len(indices) - 1:
+                row = dims[0]
+                flat = self.gen_expr(indices[0])
+                t1 = self.newtmp()
+                self.emit("*", dst=t1, a1=flat, a2=str(row), line=e.line)
+                acc = t1
+                for k in range(1, len(indices)):
+                    t2 = self.newtmp()
+                    self.emit("+", dst=t2, a1=acc,
+                              a2=self.gen_expr(indices[k]), line=e.line)
+                    acc = t2
+                return base_name, acc
             return None
         # flat = ((i0 * d1 + i1) * d2 + i2 ...)
         flat = self.gen_expr(indices[0])
@@ -395,6 +435,12 @@ class IRGen:
             return e.name
 
         if isinstance(e, BinOp):
+            # 逗号表达式：for(i=0, j=10; ...) 的初始化就是逗号。
+            # 语义 = 左边求值（丢掉），返回右边。早期 emit 成 `,` 指令，
+            # codegen 不认识直接报"不支持的 IR 指令"（实测多初始化全挂）。
+            if e.op == ",":
+                self.gen_expr(e.left)
+                return self.gen_expr(e.right)
             # && 和 || 必须短路：左边为假/真时右边一个字节都不能执行。
             # 早期两边无条件求值，`a!=0 && 10/a>1` 在 a=0 时除零崩溃
             # —— gcc 的语义是右边根本不求值（实测对照）。
@@ -585,7 +631,15 @@ class IRGen:
 
         if isinstance(e, Call):
             args = [self.gen_expr(a) for a in e.args]
-            name = e.func.name if isinstance(e.func, Ident) else "?"
+            # 被调目标：普通函数名，或表达式（函数指针数组元素
+            # ops[0]、指针解引用 (*fp)）。后者必须先求值成临时量，
+            # 早期直接给 "?"，codegen 生成非法调用（实测
+            # int (*ops[2])(int,int) 的 ops[0](3,4) 汇编报
+            # invalid character '?'）。
+            if isinstance(e.func, Ident):
+                name = e.func.name
+            else:
+                name = self.gen_expr(e.func)
             t = self.newtmp()
             self.emit("call", dst=t, a1=name, extra=", ".join(args),
                       line=e.line)
@@ -598,6 +652,20 @@ class IRGen:
                 base_name, idx = flat
                 t = self.newtmp()
                 self.emit("load", dst=t, a1=base_name, a2=idx, line=e.line)
+                return t
+            # 形参 int a[][3]：parser 丢第一维，dims 空无法拍平。
+            # 但语义上 a[i] 是一行（指针），a[i][j] = *(a[i] + j)。
+            # 用 addrof 算行地址，再对行地址做下标 load。
+            # 早期直接 load a,i 把"行"当值读，t3 不是地址，
+            # 再 load t3,j 报"对非数组做下标访问"（实测）。
+            if isinstance(e.base, Index):
+                t_addr = self.newtmp()
+                b = self.gen_expr(e.base.base)
+                i0 = self.gen_expr(e.base.idx)
+                self.emit("addrof", dst=t_addr, a1=b, a2=i0, line=e.line)
+                idx = self.gen_expr(e.idx)
+                t = self.newtmp()
+                self.emit("load", dst=t, a1=t_addr, a2=idx, line=e.line)
                 return t
             base = self.gen_expr(e.base)
             idx = self.gen_expr(e.idx)

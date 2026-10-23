@@ -1049,6 +1049,15 @@ class Parser:
                                        ptr=pty.ptr + extra_ptr,
                                        array=pty.array,
                                        dims=list(pty.dims))
+                        # int a[][3] 保留的后续维度：行宽靠它算。
+                        # 不挂上去，codegen 的 addrof 不知道一行几个
+                        # 元素，a[i] 按 4 字节步进（实测 sum2 得 18 而非 21）。
+                        kd = getattr(self, "_last_param_dims", None)
+                        if kd:
+                            pty = Type(base=pty.base, ptr=pty.ptr,
+                                       array=pty.array,
+                                       dims=list(kd))
+                            self._last_param_dims = None
                     params.append((pty, pname))
                     if self.at(","):
                         self.advance()
@@ -1147,13 +1156,26 @@ class Parser:
         # 早期只认空 []，遇到 [3] 判定失败，二维数组参数直接报
         # "期望 ')'，实际是 '['"（实测 stu_36 的
         # int sum_grid(int g[][3], int rows)，gcc 零诊断）。
+        # 非空维度要保留：int a[][3] 退化后是 int(*)[3]，
+        # 行宽 = 3×sizeof(int)，codegen 的 addrof 步长靠它算
+        # （丢掉的话 a[i] 按 4 字节步进，二维参数读取错位）。
+        kept_dims = []
         while self.at("["):
             self.advance()                       # [
             # 吃掉维度内容（空 / 数字 / 表达式），数组形参全部退化成指针
+            dim_val = None
             if not self.at("]"):
-                self.parse_expr()
+                dim_val = self.parse_expr()
             self.expect("]")
+            if dim_val is not None and hasattr(dim_val, "value"):
+                try:
+                    kept_dims.append(int(dim_val.value))
+                except (TypeError, ValueError):
+                    pass
             extra += 1          # 数组退化也等效于加一层指针
+        # 退化层数 = [] 的个数；保留的维度挂在 pty.dims 上给后端用
+        if kept_dims:
+            self._last_param_dims = kept_dims
         return (name, extra)
 
     def parse_var_rest(self, vtype, name, name_tok) -> VarDecl:

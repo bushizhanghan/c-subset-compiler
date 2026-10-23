@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """csub 网页版 —— 粘贴代码，看诊断。
 
@@ -1124,7 +1124,7 @@ footer b{
     <div class="mark"><span>&lt;/&gt;</span></div>
     <div class="title-wrap">
       <div class="title">csub 诊断台</div>
-      <div class="subtitle">C SUBSET COMPILER · v3.1</div>
+      <div class="subtitle">C SUBSET COMPILER · v2.1.1</div>
     </div>
   </div>
   <div class="spacer"></div>

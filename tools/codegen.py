@@ -145,10 +145,20 @@ def _elem_size(ty):
     if ty is None:
         return 4
     ptr = getattr(ty, "ptr", 0) or 0
-    is_arr = bool(getattr(ty, "dims", None)) or \
-        getattr(ty, "array", None) is not None
+    dims = list(getattr(ty, "dims", None) or [])
+    is_arr = bool(dims) or getattr(ty, "array", None) is not None
     if is_arr:
-        return 8 if ptr > 0 else _scalar_size(getattr(ty, "base", ""))
+        if ptr > 0 and dims:
+            # 指向数组的指针 int(*)[3]：元素（一行）大小 = 3×4=12。
+            # 注意区分两种用法：
+            #   &a[i]      （addrof）要行宽 12 —— a[i] 是一整行
+            #   a[flat]    （load）  要元素宽 4 —— flat 已是扁平索引
+            # 这里返回行宽；load/store 走 _elem_stride 拿元素宽。
+            n = 1
+            for d in dims:
+                n *= int(d)
+            return n * _scalar_size(getattr(ty, "base", ""))
+        return 8 if ptr > 1 else _scalar_size(getattr(ty, "base", ""))
     if ptr == 0:
         return _scalar_size(getattr(ty, "base", ""))
     if ptr == 1:
@@ -198,6 +208,13 @@ def collect_types(prog):
 
     for d in prog.decls:
         if isinstance(d, FuncDef):
+            # 先收集体内的局部变量类型，再登记形参——形参优先。
+            # 反过来的话，`int dist2(struct P *p)` 的形参 p 会被
+            # main 里的 `struct P p`（同名）覆盖成非指针，
+            # 于是 p->x 走"取栈地址"而不是"解引用"（实测得垃圾值）。
+            locals_before = dict(types)
+            if d.body is not None:
+                walk_stmt(d.body)
             for p in d.params:
                 # 解析器把参数存成 (Type, name) 二元组
                 if isinstance(p, (tuple, list)) and len(p) == 2:
@@ -207,8 +224,10 @@ def collect_types(prog):
                     types[pname] = ty
                 elif getattr(p, "name", None):
                     types[p.name] = getattr(p, "vtype", None)
-            if d.body is not None:
-                walk_stmt(d.body)
+            # 形参没出现的名字保持局部类型
+            for k, v in locals_before.items():
+                if k not in types:
+                    types[k] = v
         elif isinstance(d, (VarDecl, DeclGroup)):
             walk_stmt(d)
             # 顶层声明就是全局变量
@@ -338,6 +357,9 @@ class FuncGen:
         self.asm = re.sub(r"[^0-9A-Za-z_]", "_", name)
         self.instrs = instrs
         self.types = types
+        # 本函数的形参类型覆盖表（不写共享的 self.types，
+        # 否则会污染其他函数的同名变量）
+        self._type_override = {}
         self.globals = set(globals_) or set()
         self.lines = []
         self.slots = {}        # name -> rbp 偏移（正数，实际用 [rbp-off]）
@@ -404,6 +426,12 @@ class FuncGen:
             ordered.append(n)
         return ordered
 
+    def ty_of(self, name):
+        """查名字的类型：先看本函数形参覆盖表，再看全局表。"""
+        if name in self._type_override:
+            return self._type_override[name]
+        return self.types.get(name)
+
     def param_names(self):
         return self._params
 
@@ -415,7 +443,7 @@ class FuncGen:
         """
         ptr = set()
         for n in names:
-            ty = self.types.get(n)
+            ty = self.ty_of(n)
             if ty is None:
                 continue
             # 数组优先：int *p[3] 的 ptr 属性也是 1（元素是指针），
@@ -460,8 +488,8 @@ class FuncGen:
                 # 不提前标记的话，alloc 会给它按 scalar 分配，
                 # generate 时 store_reg/load_operand 只搬 32 位。
                 if ins.op in ("+", "-") and ins.dst:
-                    a1p = (ins.a1 in ptr) or _is_array(self.types.get(ins.a1))
-                    a2p = (ins.a2 in ptr) or _is_array(self.types.get(ins.a2))
+                    a1p = (ins.a1 in ptr) or _is_array(self.ty_of(ins.a1))
+                    a2p = (ins.a2 in ptr) or _is_array(self.ty_of(ins.a2))
                     if a1p != a2p and ins.dst not in ptr:
                         ptr.add(ins.dst)
                         changed = True
@@ -480,22 +508,35 @@ class FuncGen:
         names = self.scan_symbols()
         # ── 形参类型覆盖 ──
         # collect_types 是全局共享的，同名变量在不同函数里类型可能不同：
-        # `int f(int a[], int n)` 的形参 a 在 main 里是 int[4] 数组，
-        # 在 f 里已退化成指针。不覆盖的话 f 里 a+1 会按"数组元素数×
-        # 元素大小"分配槽位、按 32 位存取，指针算术直接算错
-        # （实测 f(a+1,n-1) 递归读数组输出空/垃圾）。
+        # `int dist2(struct P *p)` 的形参 p 会被 main 里的 `struct P p`
+        # 覆盖成非指针，`int f(int a[])` 的 a 会被 main 的 `int a[4]`
+        # 覆盖成数组。必须用每个函数自己的形参类型表覆盖回来，
+        # 否则指针形参按 32 位存取、数组形参按数组分配
+        # （实测 dist2(&p) 得垃圾值、f(a+1) 算错）。
+        # 数组形参一律退化成指针。
         # 形参在本函数内一律按退化后的类型看：数组形参 = 指针。
-        params = self.param_names()
-        for p in params:
-            ty = self.types.get(p)
+        # 注意：绝不写 self.types（全局共享）——dist2 的形参覆盖会把
+        # main 的同名局部变量类型也改掉（实测 dist2(&p) 后 main 的
+        # p.x=3 被当成指针解引用，读栈垃圾）。写进局部覆盖表。
+        ptypes = getattr(self, "_param_types", None) or {}
+        for p in self.param_names():
+            ty = ptypes.get(p) or self.ty_of(p)
             if ty is None:
                 continue
             if _is_array(ty):
-                # 数组形参退化为指针：指向首元素
-                self.types[p] = Type(base=(ty.base or "int").replace(
-                    "struct ", ""), ptr=1)
-            elif getattr(ty, "ptr", 0):
-                self.types[p] = ty
+                # 数组形参退化成指针。int a[][3] 的 dims=[3] 是行宽，
+                # 保留在类型上（ptr 归一成 1）——gen_addrof 的步长
+                # 靠它算一行几个元素（实测丢掉后 sum2 得 18 而非 21）。
+                # row_ptr 标记区分两种同形类型：
+                #   int a[][3] 形参  -> row_ptr=True，指向数组（行宽 12）
+                #   int *p[3]  局部  -> row_ptr=False，指针数组（元素 8）
+                pd = list(getattr(ty, "dims", None) or [])
+                t = Type(base=(ty.base or "int").replace("struct ", ""),
+                         ptr=1, dims=pd)
+                t.row_ptr = True
+                self._type_override[p] = t
+            else:
+                self._type_override[p] = ty
         # 全局变量不进栈：它们在 .data / .bss 段，走 RIP 相对寻址。
         # 早期不排除它们，会安静地分配一块栈槽去"存"全局变量，
         # 于是读写全打在栈上，全局变量永远是 0——典型的静默算错。
@@ -506,7 +547,7 @@ class FuncGen:
         for n in getattr(self, "global_names", ()):
             if n in self.kinds:
                 continue
-            ty = self.types.get(n)
+            ty = self.ty_of(n)
             if _is_array(ty):
                 self.kinds[n] = "array"
                 self.sizes[n] = max(_array_len(ty)
@@ -520,7 +561,7 @@ class FuncGen:
         self.ptr_names = self.detect_pointers(names)
         off = 0
         for n in names:
-            ty = self.types.get(n)
+            ty = self.ty_of(n)
             # 数组优先于结构体：`struct P a[3]` 是"结构体数组"，
             # 要按数组分配（size = 元素数 × 元素大小），
             # 不是按单个结构体分配。早期先判断结构体，导致
@@ -610,6 +651,8 @@ class FuncGen:
         if s not in self.slots:
             if s in getattr(self, "global_names", ()):
                 return          # 全局变量走 .data 段，mem() 会处理
+            if s in getattr(self, "all_func_names", ()):
+                return          # 函数名：取它的地址（函数指针赋值）
             raise CodegenError(
                 f"函数 {self.name}: 变量 '{s}' 不在本函数栈帧里"
                 f"（可能是全局变量/结构体成员/不支持的表达式）")
@@ -622,6 +665,13 @@ class FuncGen:
             return
         if s in getattr(self, "global_names", ()):
             self.line(f"mov {reg}, {self.mem(s)}")
+            return
+        if s in getattr(self, "all_func_names", ()):
+            # 函数名作为值：取函数地址（lea rip 相对）。
+            # int (*f)(int) = sq; 的初始化就靠这个。
+            # 标签用函数名本身（.globl sq 就是 sq:）——asm_label
+            # 会加函数前缀，链接报 undefined reference（实测踩到）。
+            self.line(f"lea {R64.get(reg, reg)}, {s}[rip]")
             return
         off = self.slot(s)
         if self.kinds[s] == "array":
@@ -927,7 +977,7 @@ class FuncGen:
             # 全是垃圾（实测 scanf("%c",&op) 后 op==43 判 false）。
             # 只清这一格，不动别的变量——全帧清零会冲掉已保存的
             # 参数（实测所有带参函数算错）。
-            ty = self.types.get(ins.a1)
+            ty = self.ty_of(ins.a1)
             if ty is not None and (ty.base or "") == "char" \
                     and getattr(ty, "ptr", 0) == 0 \
                     and not getattr(ty, "dims", None):
@@ -976,7 +1026,7 @@ class FuncGen:
 
     def _elem_size_of_ptr(self, name):
         """指针指向的元素有多少字节。"""
-        ty = self.types.get(name)
+        ty = self.ty_of(name)
         if ty is None:
             return 4
         base = (ty.base or "int").replace("struct ", "")
@@ -1082,7 +1132,20 @@ class FuncGen:
         if target in VARARG_FUNCS:
             self.line("xor eax, eax")
 
-        self.line(f"call {target}")
+        # 函数指针调用：target 是本函数里的变量（int (*f)(int) = sq;
+        # f(7)），不是函数名。必须间接调用 call rax——直接 call f
+        # 会被汇编器当成调用一个叫 f 的函数，链接报未定义
+        # （实测函数指针调用全挂）。
+        is_func_name = (target in self.funcs
+                        if hasattr(self, "funcs") else False)
+        if not is_func_name and _is_name(target) \
+                and target not in self.globals \
+                and (self.kinds.get(target) == "ptr"
+                     or target in getattr(self, "ptr_names", ())):
+            self.load_operand("rax", target)
+            self.line("call rax")
+        else:
+            self.line(f"call {target}")
         if ins.dst:
             self.store_reg(ins.dst)
 
@@ -1101,7 +1164,7 @@ class FuncGen:
             return False
         if _looks_float(s):
             return True                     # 字面量 1.5
-        ty = self.types.get(s)
+        ty = self.ty_of(s)
         if ty is not None and (ty.base or "") in ("float", "double"):
             return True
         return s in self.float_tmps
@@ -1112,7 +1175,7 @@ class FuncGen:
         用来判断 `int r = float_expr` 这种需要 cvttss2si 的场景。
         临时量（t1/t2）不查——它们的类型由产生它的指令决定。
         """
-        ty = self.types.get(name)
+        ty = self.ty_of(name)
         if ty is None:
             return False                    # 临时量/未知：不插手
         base = (ty.base or "").replace("struct ", "")
@@ -1273,7 +1336,7 @@ class FuncGen:
         # 结构体数组元素取址得到的临时量：它本身就是地址
         if name in self.struct_ptr_of:
             return self.struct_ptr_of[name], True
-        return self._struct_layout_of_type(self.types.get(name))
+        return self._struct_layout_of_type(self.ty_of(name))
 
     def _struct_layout_of_type(self, ty):
         """按类型查结构体布局，返回 (lay, deref) 或 (None, False)。"""
@@ -1355,7 +1418,7 @@ class FuncGen:
                 and base not in getattr(self, "ptr_names", ()):
             raise CodegenError(
                 f"函数 {self.name}: 对非数组/非指针 '{base}' 做下标访问")
-        ty = self.types.get(base)
+        ty = self.ty_of(base)
         esz = self._elem_stride(ty) if ty is not None else 4
         # 元素是结构体时，load 得到的是"元素地址"而不是值：
         # a[0].x 需要 a[0] 的地址再按成员偏移访问。
@@ -1386,9 +1449,15 @@ class FuncGen:
         self.lea_base("rdx", base)
         if _is_int_literal(idx):
             self.line(f"{load_ins} [rdx+{int(idx) * esz}]")
-        else:
-            self.load_operand("ecx", "rdx" if False else idx)
+        elif esz in (1, 2, 4, 8):
+            self.load_operand("ecx", idx)
             self.line(f"{load_ins} [rdx+rcx*{esz}]")
+        else:
+            # 非 2 幂步长（int a[][3] 的行宽 12）：先乘再加
+            self.load_operand("ecx", idx)
+            self.line(f"imul rcx, {esz}")
+            self.line(f"add rdx, rcx")
+            self.line(f"{load_ins} [rdx]")
         if esz == 8:
             # 指针元素：整个 64 位都是有效值
             off = self.slot(ins.dst)
@@ -1413,15 +1482,24 @@ class FuncGen:
                 and base not in getattr(self, "ptr_names", ()):
             raise CodegenError(
                 f"函数 {self.name}: 对非数组/非指针 '{base}' 取元素地址")
-        ty = self.types.get(base)
-        esz = self._elem_stride(ty) if ty is not None else 4
+        ty = self.ty_of(base)
+        # addrof 算的是"元素地址"，步长用 _elem_size（含行宽语义）：
+        # 形参 int a[][3] 的 &a[i] 要 12（一行），load 的扁平索引要 4。
+        # 混用会把 a[i] 的地址算错（实测 sum2 得 18）。
+        esz = _elem_size(ty) if ty is not None else 4
 
         self.lea_base("rdx", base)
         if _is_int_literal(idx):
             self.line(f"lea rax, [rdx+{int(idx) * esz}]")
-        else:
+        elif esz in (1, 2, 4, 8):
             self.load_operand("ecx", idx)
             self.line(f"lea rax, [rdx+rcx*{esz}]")
+        else:
+            # 非 2 幂步长：先乘再加
+            self.load_operand("ecx", idx)
+            self.line(f"imul rcx, {esz}")
+            self.line(f"add rdx, rcx")
+            self.line("mov rax, rdx")
 
         off = self.slot(ins.dst)
         self.line(f"mov QWORD PTR [rbp-{off}], rax")
@@ -1433,14 +1511,52 @@ class FuncGen:
             self.struct_ptr_of[ins.dst] = lay
 
     def _elem_stride(self, ty):
-        """数组/指针的步长 = 元素大小。结构体元素要按布局算。"""
+        """load/store 的步长 = 单个元素大小。
+
+        和 _elem_size 的区别：int(*)[3]（退化形参 int a[][3]）在
+        _elem_size 里返回行宽 12（给 &a[i] 用），但 IR 的扁平索引
+        a[i*3+j] 已经除过行宽，步长必须是元素大小 4。
+        早期直接复用 _elem_size，imul 乘了两次（实测 sum2 得 65530）。
+        row_ptr 区分同形类型：int a[][3] 形参（行宽）vs int *p[3]
+        局部指针数组（元素 8 字节）——两者都是 ptr=1 dims=[3]。
+        """
         if ty is None:
             return 4
+        if getattr(ty, "row_ptr", False):
+            # 形参 int a[][3]：扁平索引场景，步长 = 标量大小
+            return _scalar_size(getattr(ty, "base", "") or "int")
+        if getattr(ty, "ptr", 0) and (getattr(ty, "dims", None)
+                                      or getattr(ty, "array", None)):
+            # 局部 int *p[3]：元素是指针，8 字节
+            return 8
         elem = _elem_type_of(ty)
         lay, _ = self._struct_layout_of_type(elem)
         if lay is not None:
             return lay["size"]
         return _elem_size(ty)
+
+    def _scaled_addr(self, rdx_base, idx, esz):
+        """算 [base + idx*esz] 的地址表达式。
+
+        x86 的 scale 只支持 1/2/4/8。esz=12（int[3] 一行）这种
+        非 2 幂步长必须先 imul 到寄存器再加——直接写 rcx*12
+        汇编器报 "not a valid base/index expression"（实测
+        sum2(int a[][3]) 链接失败）。
+        返回 (addr_expr, 是否需要先算寄存器)。
+        """
+        if esz in (1, 2, 4, 8):
+            if _is_int_literal(idx):
+                return f"[{rdx_base}+{int(idx) * esz}]", False
+            self.load_operand("ecx", idx)
+            return f"[{rdx_base}+rcx*{esz}]", False
+        # 非 2 幂：先算 idx*esz 到 eax
+        if _is_int_literal(idx):
+            off = int(idx) * esz
+            return f"[{rdx_base}+{off}]", False
+        self.load_operand("eax", idx)
+        self.line(f"imul eax, {esz}")
+        self.line(f"add rax, {rdx_base}")
+        return "[rax]", True
 
     def gen_store(self, ins):
         base, idx, val = ins.extra, ins.a1, ins.a2
@@ -1456,8 +1572,8 @@ class FuncGen:
         if not ok_base:
             raise CodegenError(
                 f"函数 {self.name}: 对非数组/非指针 '{base}' 做下标写")
-        ty = self.types.get(base)
-        esz = _elem_size(ty) if ty is not None else 4
+        ty = self.ty_of(base)
+        esz = self._elem_stride(ty) if ty is not None else 4
         # 宽度必须和步长一致：int *p[3] 元素是指针（8 字节），
         # 早期 width 一律 DWORD，地址按 8 步进但只写 4 字节，
         # 高 4 字节留栈垃圾，读出来是随机地址（实测 *p[0] 得 559937664）。
@@ -1472,7 +1588,12 @@ class FuncGen:
             addr = f"[rdx+{int(idx) * esz}]"
         else:
             self.load_operand("ecx", idx)
-            addr = f"[rdx+rcx*{esz}]"
+            addr = f"[rdx+rcx*{esz}]" if esz in (1, 2, 4, 8) else None
+            if addr is None:
+                # 非 2 幂步长：先算 idx*esz 再加基址
+                self.line(f"imul rcx, {esz}")
+                self.line(f"add rdx, rcx")
+                addr = "[rdx]"
         # 值先算到 eax，但地址用了 ecx；如果值依赖 ecx 会冲突，
         # 所以先把值放进 r8，再写内存。
         # 注意宽度匹配：char 数组存 1 字节，但 load_operand 加载
@@ -1626,6 +1747,11 @@ def generate_asm(prog, optimize=False, verbose=False):
         fg.global_names = global_names
         fg.structs = structs
         fg.ptr_returning_funcs = ptr_returning
+        # 本函数自己的形参类型表（避免同名局部变量污染）
+        fg._param_types = _param_types_of(prog, name)
+        # 全部函数名：函数名当值用时要取它的地址（函数指针）
+        fg.all_func_names = frozenset(n for n, _ in funcs)
+        fg.funcs = frozenset(n for n, _ in funcs)
         fg.alloc()
         out.extend(fg.gen())
         # 收集本函数用到的字符串字面量（跨函数去重）
@@ -1697,6 +1823,7 @@ def gen_global_data(global_inits, types):
         ty = types.get(name)
         if _is_array(ty):
             total = _array_len(ty)
+            # 模块级函数，没有 self——直接用 _elem_size
             esz = _elem_size(ty) if ty is not None else 4
             nbytes = max(total * esz, esz)
             if not instrs:
@@ -1768,6 +1895,28 @@ def _params_of(prog, fname):
                     names.append(p.name)
             return names
     return []
+
+
+def _param_types_of(prog, fname):
+    """某个函数的 形参名 -> Type 表。
+
+    collect_types 的全局表会被同名局部变量污染
+    （int dist2(struct P *p) 的 p 被 main 的 struct P p 覆盖），
+    所以每个函数要单独拿自己的形参类型。
+    """
+    for d in prog.decls:
+        if isinstance(d, FuncDef) and d.name == fname:
+            out = {}
+            for p in d.params:
+                if isinstance(p, (tuple, list)) and len(p) == 2:
+                    ty, pn = p
+                    pn = getattr(pn, "name", pn)
+                    if pn:
+                        out[pn] = ty
+                elif getattr(p, "name", None):
+                    out[p.name] = getattr(p, "vtype", None)
+            return out
+    return {}
 
 
 def compile_source(src, optimize=False, verbose=False):

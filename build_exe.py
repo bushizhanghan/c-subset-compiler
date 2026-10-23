@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """一键打包成 exe —— 把 csub 发给别人的最简方式。
 
 用法：
@@ -25,7 +25,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
 DIST = os.path.join(ROOT, "dist")
-VERSION = "v3.1"
+VERSION = "v2.1.1"
 ZIP_NAME = "csub-%s-win64.zip" % VERSION
 
 
