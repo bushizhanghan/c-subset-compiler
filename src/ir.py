@@ -99,6 +99,11 @@ def _array_total(vtype):
     if dims:
         n = 1
         for d in dims:
+            # 空维度（char s[]="Hello" 的 [] ）是 None，
+            # 长度由初始化列表推。防御掉，否则 int(None) 崩
+            # （实测 char s[] 初始化直接 TypeError）。
+            if d is None:
+                return 0
             n *= int(d)
         return n
     a = getattr(vtype, "array", None)
@@ -346,6 +351,12 @@ class IRGen:
                     row_len = len(it.items)
                     break
             flatten(vd.init.items, row_len)
+            total = _array_total(vd.vtype)
+            if total <= 0:
+                # int a[] = {1,2,3}：空维度，长度由初始化列表推
+                total = len(flat)
+                self.emit("arrayinfer", extra=vd.name, a1=str(total),
+                          line=vd.line)
             for idx, v in enumerate(flat):
                 self.emit("store", a1=str(idx), a2=v, extra=vd.name,
                           line=vd.line)
@@ -356,12 +367,22 @@ class IRGen:
         # 正确语义：逐字节写入 + 结尾补 \0。
         if isinstance(vd.init, Str) and _is_char_array(vd.vtype):
             text = vd.init.value
+            total = _array_total(vd.vtype)
+            if total <= 0:
+                # char s[] = "hello"：空维度，长度由字符串推
+                # （C 语义 = 字符数 + 1 个 \0）。total=0 时
+                # end 会算成 -1，一个字节都不写（实测 s 全空）。
+                total = len(text) + 1
+                # 通过 IR 指令把推断出的长度传给 codegen 的 alloc：
+                # codegen 只看到 IR 文本，拿不到 vtype
+                self.emit("arrayinfer", extra=vd.name, a1=str(total),
+                          line=vd.line)
             for idx, ch in enumerate(text):
-                if idx >= _array_total(vd.vtype) - 1:
+                if idx >= total - 1:
                     break                   # 留 1 字节给 \0
                 self.emit("store", a1=str(idx), a2=str(ord(ch)),
                           extra=vd.name, line=vd.line)
-            end = min(len(text), _array_total(vd.vtype) - 1)
+            end = min(len(text), total - 1)
             self.emit("store", a1=str(end), a2="0", extra=vd.name,
                       line=vd.line)
             return
@@ -445,26 +466,37 @@ class IRGen:
             # 早期两边无条件求值，`a!=0 && 10/a>1` 在 a=0 时除零崩溃
             # —— gcc 的语义是右边根本不求值（实测对照）。
             if e.op in ("&&", "||"):
+                # && 和 || 必须短路：左边为假/真时右边一个字节都不能执行。
+                # 早期两边无条件求值，`a!=0 && 10/a>1` 在 a=0 时除零崩溃
+                # —— gcc 的语义是右边根本不求值（实测对照）。
+                # 另外结果必须归一成 0/1：C 里 `5 && 3` 的值是 1，
+                # 不是 3。早期直接把右操作数的值当结果
+                # （实测 printf("%d %d", a&&b, a||b) 打出 3 3 而非 1 1）。
                 l = self.gen_expr(e.left)
                 t = self.newtmp()
                 res = self.newtmp()
+                rzero = self.newtmp()
+                rnorm = self.newtmp()
                 lfail = self.newlabel()
                 ldone = self.newlabel()
                 if e.op == "&&":
                     # 左为假 -> 直接出 0，跳过右边
                     self.emit("if", a1=l, extra=lfail, line=e.line)
                     r = self.gen_expr(e.right)
-                    self.emit("=", dst=res, a1=r, line=e.line)
+                    # 右值归一：r != 0 ? 1 : 0
+                    self.emit("!=", dst=rzero, a1=r, a2="0", line=e.line)
+                    self.emit("=", dst=res, a1=rzero, line=e.line)
                     self.emit("goto", extra=ldone, line=e.line)
                     self.emit("label", extra=lfail, line=e.line)
                     self.emit("=", dst=res, a1="0", line=e.line)
                     self.emit("label", extra=ldone, line=e.line)
                 else:
-                    # || 左为真 -> 直接出 1
+                    # || 左为真 -> 直接出 1；否则右值归一
                     lok = self.newlabel()
                     self.emit("if", a1=l, extra=lok, line=e.line)
                     r = self.gen_expr(e.right)
-                    self.emit("=", dst=res, a1=r, line=e.line)
+                    self.emit("!=", dst=rzero, a1=r, a2="0", line=e.line)
+                    self.emit("=", dst=res, a1=rzero, line=e.line)
                     self.emit("goto", extra=ldone, line=e.line)
                     self.emit("label", extra=lok, line=e.line)
                     self.emit("=", dst=res, a1="1", line=e.line)

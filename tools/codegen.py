@@ -343,6 +343,12 @@ def _array_len(ty):
     if dims:
         n = 1
         for d in dims:
+            # 空维度（char s[]="hello" 的 []）是 None，长度由
+            # 初始化列表推。int(None) 会崩（实测 char s[] 声明
+            # 在 codegen 里 TypeError）——遇到 None 就当 0，
+            # 由调用方按"至少一个元素"兜底。
+            if d is None:
+                return 0
             n *= int(d)
         return n
     a = getattr(ty, "array", None)
@@ -360,6 +366,8 @@ class FuncGen:
         # 本函数的形参类型覆盖表（不写共享的 self.types，
         # 否则会污染其他函数的同名变量）
         self._type_override = {}
+        # IR 推断出的数组长度（char s[]="hello" / int a[]={1,2,3}）
+        self.inferred_sizes = {}
         self.globals = set(globals_) or set()
         self.lines = []
         self.slots = {}        # name -> rbp 偏移（正数，实际用 [rbp-off]）
@@ -550,14 +558,23 @@ class FuncGen:
             ty = self.ty_of(n)
             if _is_array(ty):
                 self.kinds[n] = "array"
-                self.sizes[n] = max(_array_len(ty)
-                                    * (_elem_size(ty) if ty else 4), 4)
+                st = _elem_size(ty) if ty else 4
+                total = _array_len(ty)
+                if total <= 0:
+                    total = self.inferred_sizes.get(n, 0)
+                self.sizes[n] = max(total * st, 4)
             elif ty is not None and (ty.ptr or 0) > 0:
                 self.kinds[n] = "ptr"
             else:
                 self.kinds[n] = "scalar"
         names = [n for n in names
                  if n not in getattr(self, "global_names", ())]
+        # 预扫 arrayinfer：IR 从初始化列表推出的数组长度。
+        # 必须在分配槽位前拿到——char s[]="hello" 的 vtype 里
+        # 维度是 None，不预扫会分 0 字节（实测写入踩内存）。
+        for ins in self.instrs:
+            if ins.op == "arrayinfer" and ins.extra:
+                self.inferred_sizes[ins.extra] = int(ins.a1)
         self.ptr_names = self.detect_pointers(names)
         off = 0
         for n in names:
@@ -567,8 +584,12 @@ class FuncGen:
             # 不是按单个结构体分配。早期先判断结构体，导致
             # 结构体数组只分到一个元素的槽位，下标访问被拒。
             if _is_array(ty):
-                nbytes = _array_len(ty) * self._elem_stride(ty)
-                nbytes = max(nbytes, self._elem_stride(ty))
+                # 空维度数组长度从 IR 推断（char s[]="hello"）
+                total = _array_len(ty)
+                if total <= 0:
+                    total = self.inferred_sizes.get(n, 0)
+                stride = self._elem_stride(ty)
+                nbytes = max(total * stride, stride)
                 off += nbytes
                 off = (off + 7) // 8 * 8          # 8 字节对齐
                 self.slots[n] = off
@@ -804,6 +825,14 @@ class FuncGen:
             self.line(f"{j} {self.asm_label(ins.extra)}")
             return
 
+        if op == "arrayinfer":
+            # IR 推出来的数组长度（char s[]="hello" / int a[]={1,2,3}）。
+            # 空维度时 vtype 里没有长度，alloc 会分 0 字节槽位，
+            # 初始化写入直接踩相邻变量（实测 s 内容为空/错乱）。
+            # 记在 inferred_sizes 里，alloc 分配槽位时优先用它。
+            self.inferred_sizes[ins.extra] = int(ins.a1)
+            return
+
         if op == "return":
             if ins.a1:
                 if self._operand_is_float(ins.a1):
@@ -858,6 +887,14 @@ class FuncGen:
             # `int *p = a; p = p + 1; return *p;` 直接 0xC0000005）。
             if op in ("+", "-") and self._is_ptr_arith(ins):
                 self.gen_ptr_arith(ins)
+                return
+            # 指针减指针：C 语义是"相差几个元素"，不是字节差。
+            # 早期走普通 sub，load_operand 对指针出 mov rax(64位)
+            # 但 sub eax(32位)，汇编器报 register type mismatch
+            # （实测 slen 里 p-s 链接失败）。
+            if op == "-" and self._operand_is_ptr(ins.a1) \
+                    and self._operand_is_ptr(ins.a2):
+                self.gen_ptr_sub(ins)
                 return
             self.load_operand("eax", ins.a1)
             self.line(f"{BIN_ALU[op]} eax, {self.op2(ins.a2)}")
@@ -1023,6 +1060,28 @@ class FuncGen:
         if self._operand_is_ptr(ins.a2) and not self._operand_is_ptr(ins.a1):
             return True
         return False
+
+    def gen_ptr_sub(self, ins):
+        """指针减指针：结果 = 字节差 / sizeof(元素) = 相差几个元素。
+
+        C 标准语义。64 位相减再除——早期走 32 位普通 sub，
+        汇编器报 register type mismatch（实测 slen 的 p-s）。
+        """
+        self.load_operand("rax", ins.a1)
+        # 第二个指针也加载到寄存器再减（避免内存操作数宽度不匹配）
+        self.load_operand("rcx", ins.a2)
+        self.line("sub rax, rcx")
+        esz = self._elem_size_of_ptr(ins.a1)
+        if esz > 1:
+            if esz & (esz - 1) == 0:
+                shift = esz.bit_length() - 1
+                self.line(f"sar rax, {shift}")
+            else:
+                self.line("cqo")
+                self.line(f"mov rcx, {esz}")
+                self.line("idiv rcx")
+        self.line("movsxd rax, eax")
+        self.store_reg(ins.dst)
 
     def _elem_size_of_ptr(self, name):
         """指针指向的元素有多少字节。"""
