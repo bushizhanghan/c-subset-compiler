@@ -592,7 +592,16 @@ class IRGen:
                 # 于是 (float)7 直接把整数位 7 当浮点存 —— 输出 0.0。
                 ct = getattr(e, "cast_type", None)
                 cbase = (ct.base or "") if ct is not None else ""
-                if cbase in ("float", "double"):
+                cptr = getattr(ct, "ptr", 0) or 0
+                # 指针 cast（(char **)malloc(...) / (int *)p）：
+                # 只是换类型视角，值一个字节都不能动。
+                # 早期只看 cbase，`(char **)` 的 base 是 "char"
+                # 命中 ftoi，把 malloc 返回的 64 位地址当浮点转整数
+                # —— 得到完全错误的指针，一解引用就 0xC0000005
+                # （实测 buildArray 的 ans=(char**)malloc(...)）。
+                if cptr > 0:
+                    self.emit("=", dst=t, a1=v, line=e.line)
+                elif cbase in ("float", "double"):
                     self.emit("itof", dst=t, a1=v, line=e.line)
                 elif cbase in ("int", "char", "long", "short"):
                     self.emit("ftoi", dst=t, a1=v, line=e.line)

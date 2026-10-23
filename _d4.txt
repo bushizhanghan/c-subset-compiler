@@ -1,0 +1,4 @@
+OK   A 纯出参            gcc='2'(0) csub='2'(0)
+OK   B +malloc返回      gcc='2'(0) csub='2'(0)
+OK   C +char**返回      gcc='2'(0) csub='2'(0)
+DIFF D +字符串写入         gcc='Push 2'(0) csub='Push'(0)

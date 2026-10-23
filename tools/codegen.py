@@ -358,7 +358,8 @@ def _array_len(ty):
 # ---------------- 单个函数 ----------------
 
 class FuncGen:
-    def __init__(self, name, instrs, types, globals_=frozenset()):
+    def __init__(self, name, instrs, types, globals_=frozenset(),
+                 shared_str_pool=None, shared_fconst_pool=None):
         self.name = name
         self.asm = re.sub(r"[^0-9A-Za-z_]", "_", name)
         self.instrs = instrs
@@ -377,11 +378,17 @@ class FuncGen:
         self.ptr_names = set()
         # 字符串字面量池：文本 -> 标签。跨函数共享，
         # 在 generate_asm 里统一输出到 .rdata 段。
-        self._str_pool = {}
+        # 必须共享：各函数独立编号会让 f 的 _str_0="Push" 和
+        # main 的 _str_0="after=%d" 撞同一标签，去重只留一个，
+        # 另一个函数的 printf 就打错字符串（实测输出 "Push"）。
+        self._str_pool = shared_str_pool if shared_str_pool is not None else {}
         self._str_data = []
         # 浮点：已知是 float 的临时量/变量名，以及浮点常量池
         self.float_tmps = set()
-        self._fconst_pool = {}
+        # 浮点常量池同样跨函数共享（同字符串池的理由：各函数独立
+        # 编号会让 _fc_0 在不同函数指向不同常量）
+        self._fconst_pool = shared_fconst_pool \
+            if shared_fconst_pool is not None else {}
         self._fconst_data = []
         # 结构体数组元素取址得到的临时量 -> 它指向的布局。
         # a[0].x 里 gen_load 产出 t1 存 a[0] 的地址，
@@ -678,13 +685,28 @@ class FuncGen:
                 f"函数 {self.name}: 变量 '{s}' 不在本函数栈帧里"
                 f"（可能是全局变量/结构体成员/不支持的表达式）")
 
-    def load_operand(self, reg, s):
-        """把操作数载入寄存器。指针走 64 位，整数走 32 位。"""
+    def load_operand(self, reg, s, _is_ptr_ctx=False):
+        """把操作数载入寄存器。指针走 64 位，整数走 32 位。
+
+        _is_ptr_ctx：调用方要求 64 位地址（传参/赋值给指针变量）。
+        全局 char 数组名在这种上下文里要退化成首元素地址。
+        """
         self.check_operand(s)
         if _is_int_literal(s):
             self.line(f"mov {reg}, {s}")
             return
         if s in getattr(self, "global_names", ()):
+            # 全局变量默认走 .data 段的 RIP 相对寻址，按标量读。
+            # 但全局 char 数组名当指针用时要退化成首元素地址
+            # （char **ans = (char **)buf;）。早期一律
+            # mov eax, DWORD PTR buf[rip]，把 buf 前 4 个字节的
+            # 内容当指针 —— 一解引用就 0xC0000005
+            # （实测静态缓冲区版 buildArray 直接崩）。
+            if self.kinds.get(s) == "array" and _is_ptr_ctx:
+                self.line(f"lea {R64.get(reg, reg)}, {self.asm_label(s)}[rip]")
+                return
+                self.line(f"lea {R64.get(reg, reg)}, {self.asm_label(s)}[rip]")
+                return
             self.line(f"mov {reg}, {self.mem(s)}")
             return
         if s in getattr(self, "all_func_names", ()):
@@ -876,7 +898,12 @@ class FuncGen:
                     return
 
         if op == "=":
-            self.load_operand("eax", ins.a1)
+            # 目标是指针时按 64 位地址加载：全局 char 数组名
+            # （char **ans = (char **)buf;）要退化成首元素地址，
+            # 不能把数组前 4 个字节的内容当指针（实测 0xC0000005）。
+            dst_ptr = (self.kinds.get(ins.dst) == "ptr"
+                       or ins.dst in getattr(self, "ptr_names", ()))
+            self.load_operand("eax", ins.a1, _is_ptr_ctx=dst_ptr)
             self.store_reg(ins.dst)
             return
 
@@ -1660,6 +1687,15 @@ class FuncGen:
         # "mov r8b, DWORD PTR" 这种宽度不一致的指令（汇编器报
         # operand type mismatch，实测 char 数组动态写入全挂）。
         # 解决：统一加载到 32 位 r8d，存储时按 esz 取对应宽度。
+        # 字符串字面量（char *a[3]={"x","y"} 或 a[i]="Push"）：
+        # 池化到 .rdata 后存它的地址（64 位）。早期直接报
+        # "字符串字面量不支持"，字符串数组赋值全挂
+        # （实测 buildArray 的 ans[i]="Push"，gcc 零诊断）。
+        if isinstance(val, str) and val.startswith('"'):
+            label = self._intern_string(val)
+            self.line(f"lea r8, {label}[rip]")
+            self.line(f"mov QWORD PTR {addr}, r8")
+            return
         self.load_operand("r8d", val)
         if esz == 1:
             self.line(f"mov BYTE PTR {addr}, r8b")
@@ -1777,10 +1813,9 @@ def generate_asm(prog, optimize=False, verbose=False):
     # 但 IR 侧早已把它们放进来了（global X: + 初始化指令），
     # 后端再拒绝就是自相矛盾。现在真的支持：进 .data / .bss 段。
     global_names = set(n for n, _ in global_inits)
-    # 字符串字面量池（跨函数去重）
+    # 字符串字面量池（跨函数共享，按文本去重）
     str_pool = {}
-    seen_str_labels = set()
-    # 浮点常量池（跨函数去重）
+    # 浮点常量池（跨函数共享）
     fc_pool = {}
     seen_fc_labels = set()
 
@@ -1801,7 +1836,12 @@ def generate_asm(prog, optimize=False, verbose=False):
     for name, instrs in funcs:
         out.append("")
         out.append(f"\t.globl {re.sub(r'[^0-9A-Za-z_]', '_', name)}")
-        fg = FuncGen(name, instrs, types, globals_)
+        # 字符串池跨函数共享：标签按全局顺序分配，避免不同函数的
+        # 同号标签指向不同文本（实测 f 的 _str_0="Push" 与 main 的
+        # _str_0="after=%d" 相撞，printf 打出错字符串）。
+        fg = FuncGen(name, instrs, types, globals_,
+                     shared_str_pool=str_pool,
+                     shared_fconst_pool=fc_pool)
         fg._params = [p for p in _params_of(prog, name)]
         fg.global_names = global_names
         fg.structs = structs
@@ -1813,16 +1853,9 @@ def generate_asm(prog, optimize=False, verbose=False):
         fg.funcs = frozenset(n for n, _ in funcs)
         fg.alloc()
         out.extend(fg.gen())
-        # 收集本函数用到的字符串字面量（跨函数去重）
-        for text, label in fg._str_pool.items():
-            if label not in seen_str_labels:
-                seen_str_labels.add(label)
-                str_pool[text] = label
-        # 浮点常量同样跨函数去重
-        for text, label in fg._fconst_pool.items():
-            if label not in seen_fc_labels:
-                seen_fc_labels.add(label)
-                fc_pool[text] = label
+        # 字符串/浮点常量池已经跨函数共享（同一个 dict 对象），
+        # _intern_string 内部按文本去重，这里不用再收。
+        # 浮点常量同理。
     # 字符串字面量放 .rdata，必须在 .text 之后、且所有函数都生成完
     # 之后统一输出（标签跨函数共享，重复定义会链接失败）。
     if str_pool or fc_pool:

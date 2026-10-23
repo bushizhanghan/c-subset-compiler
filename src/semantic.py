@@ -2227,6 +2227,13 @@ class Analyzer:
         # 情形 1：类型名或 struct X（parser 用 Ident 承载）
         if isinstance(node, Ident):
             name = node.name
+            # 指针类型名：sizeof(char*) / sizeof(int **) / sizeof(void *)
+            # parser 把 "char *" 整体塞进 Ident.name。早期只查
+            # TYPE_SIZE（里面没有带星号的条目），落到"查变量名"
+            # 也找不到，返回 4 —— 于是 malloc(sizeof(char*)*n)
+            # 只分到一半内存，写第二个元素就越界（实测 0xC0000005）。
+            if name.endswith("*"):
+                return 8
             if name in self.TYPE_SIZE:
                 return self.TYPE_SIZE[name]
             if name.startswith("struct "):
@@ -2316,14 +2323,31 @@ class Analyzer:
         if got_base not in consts and not got_base.startswith("struct"):
             return
         got_ptr = (vt.ptr > 0 or vt.array is not None or bool(vt.dims))
-        if want_ptr == got_ptr:
+        # 指针**层数**也要比：char** 函数返回 char* 是真实错误
+        # （gcc: returning 'char *' from a function with incompatible
+        # return type 'char **'）。早期只比"是不是指针"的布尔值，
+        # char* 和 char** 都算 True 就漏了
+        # （实测 buildArray 返回 int*/char* 但声明 char**，零诊断）。
+        got_levels = vt.ptr or (1 if (vt.array is not None or vt.dims) else 0)
+        want_levels = getattr(decl, "ptr", 0)
+        # 数组名当返回值：int f(){ int a[3]; return a; } 语义上
+        # 退化成一级指针。这里把数组/维度折算成 1 层，已由
+        # got_levels 处理。
+        if want_ptr == got_ptr and want_levels == got_levels:
             return
         # 空指针常量（NULL/0）返回给指针函数是合法惯用法
         # （switch 的 default: return NULL;），不报
         # （实测 c_ds_algo 的 to_string）。
         if want_ptr and _is_null_const(ret.value):
             return
-        if want_ptr:
+        if want_ptr and got_ptr:
+            # 都是指针但层数不同：char** 函数 return 了 char*
+            self.warn("W27", ret.line, ret.col,
+                      f"函数声明返回 {base}{'*' * want_levels}，"
+                      f"但这里 return 的是 {got_base}{'*' * got_levels}"
+                      f"（{vt.text()}），指针层数不一致",
+                      "检查是否少写了一层 *，或返回了错误的变量")
+        elif want_ptr:
             self.warn("W27", ret.line, ret.col,
                       f"函数声明返回指针，"
                       f"但这里 return 的是 {got_base} 值（{vt.text()}）",

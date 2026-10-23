@@ -579,6 +579,53 @@ CASES += [
      '  if(a[i]>m1){ m2=m1; m1=a[i]; }'
      '  else if(a[i]>m2){ m2=a[i]; } }'
      ' printf("%d\n", m2); return 0; }', None),
+
+    # ── v2.1.2：指针层数不匹配（用户报的 buildArray，W27 回归）──
+    # int* 形态：ans 声明成 int*，却要塞 char* 字符串、返回 char**
+    ("real2", "ans int* 层数错", '#include <stdlib.h>\n'
+     'char** buildArray(int* target, int targetSize, int n, int* returnSize) {\n'
+     '    int* ans=(int *)malloc(sizeof(int)*300);\n'
+     '    int j=0,i=0,count=0,count1=0;\n'
+     '    while(1){\n'
+     '        while(1){ i++;\n'
+     '            ans[j]="Push"; j++; count++; count1++;\n'
+     '            if(i==n){ break; }\n'
+     '        }\n'
+     '        if(count==targetSize){ break; }\n'
+     '    }\n'
+     '    *returnSize=count1;\n'
+     '    return ans;\n'
+     '}\n'
+     'int main(){ int t[2]={1,2}; int rs;'
+     ' char** r=buildArray(t,2,2,&rs); return 0; }', None),
+    # char* 形态：ans 是一维 char*，ans[j] 是单个 char
+    ("real2", "ans char* 层数错", '#include <stdlib.h>\n'
+     'char** buildArray(int* target, int targetSize, int n, int* returnSize) {\n'
+     '    char* ans=(char *)malloc(sizeof(char)*300);\n'
+     '    int j=0,i=0,count=0,count1=0;\n'
+     '    while(1){\n'
+     '        while(1){ i++;\n'
+     '            ans[j]="Push"; j++; count++; count1++;\n'
+     '            if(i==n){ break; }\n'
+     '        }\n'
+     '        if(count==targetSize){ break; }\n'
+     '    }\n'
+     '    *returnSize=count1;\n'
+     '    return ans;\n'
+     '}\n'
+     'int main(){ int t[2]={1,2}; int rs;'
+     ' char** r=buildArray(t,2,2,&rs); return 0; }', None),
+    # 合法对照：正确的 char** 声明
+    ("real2", "ans 正确 char**", '#include <stdlib.h>\n'
+     'char** buildArray(int* target, int n, int* returnSize) {\n'
+     '    char** ans=(char **)malloc(sizeof(char*)*n);\n'
+     '    int i;\n'
+     '    for(i=0;i<n;i=i+1){ ans[i]="Push"; }\n'
+     '    *returnSize=n;\n'
+     '    return ans;\n'
+     '}\n'
+     'int main(){ int t[2]={1,2}; int rs;'
+     ' char** r=buildArray(t,2,&rs); return 0; }', None),
 ]
 
 

@@ -25,7 +25,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
 DIST = os.path.join(ROOT, "dist")
-VERSION = "v2.1.2"
+VERSION = "v2.2.0"
 ZIP_NAME = "csub-%s-win64.zip" % VERSION
 
 
