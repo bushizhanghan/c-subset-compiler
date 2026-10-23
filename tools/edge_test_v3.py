@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v3 轮：24 个全新边界用例（前三轮都没测过的形态）。"""
+"""round3：24 个全新边界用例（前三轮都没测过的形态）。"""
 import os
 import shutil
 import subprocess
@@ -168,7 +168,7 @@ for name, src, stdin_data in CASES:
                                                (c[0] or "")[:26])))
 
 print()
-print("v3 边界测试: %d/%d 一致（跳过 %d）"
+print("round3 边界测试: %d/%d 一致（跳过 %d）"
       % (passed, passed + failed, skipped))
 if fails:
     print()
