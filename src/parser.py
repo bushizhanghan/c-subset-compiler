@@ -1244,9 +1244,14 @@ class Parser:
         while self.at(","):
             self.advance()
             # 后续变量沿用同一基础类型，但指针层数可能不同：int a, *p;
-            # 符号性也要沿用：unsigned int a, *p; 两个都是无符号。
+            # 符号性、long 标记也要沿用：unsigned int a, *p; 两个都是无符号；
+            # long long N, M; 两个都是 long long。
+            # 漏掉 long_flag 会让声明组第二个变量变回 int，
+            # W23 对 `long long N, M; scanf("%lld", &M)` 误报
+            # （实测用户程序，gcc 零警告）。
             sub = Type(base=vtype.base, ptr=0, array=None,
                        unsigned=vtype.unsigned)
+            sub.long_flag = bool(getattr(vtype, "long_flag", False))
             while self.at("*"):
                 self.advance()
                 sub.ptr += 1
@@ -1787,6 +1792,7 @@ class Parser:
                                        "short", "long")):
             base = self.cur.value
             is_float = base in ("float", "double")
+            long_count = 1 if base == "long" else 0
             while (self.cur.kind == Tok.KW
                    and self.cur.value in ("signed", "unsigned", "short",
                                           "long", "int", "char", "float",
@@ -1800,6 +1806,8 @@ class Parser:
                                         "signed", "unsigned"):
                     if self.cur.value in ("int", "char", "long", "short"):
                         base = self.cur.value
+                if self.cur.value == "long":
+                    long_count += 1
                 self.advance()
             ptr = 0
             while self.at("*"):
@@ -1820,7 +1828,13 @@ class Parser:
             # (double)/(char) 的所有类型检查也全部失准。
             ty = Type(base=base if base not in ("signed", "unsigned")
                       else "int")
-            ty.long_flag = False
+            # long/long long 要传给 W23（格式符检查）。
+            # 注意：不能无条件清 long_flag——声明组 `long long N, M;`
+            # 的第二个变量会重新走这里，清掉后 M 变回 int，
+            # %lld 配 long long 就误报（实测用户程序）。
+            # long_count 由词法阶段数出来的 long 个数决定。
+            if long_count:
+                ty.long_flag = True
             if is_float:
                 ty.base = base if base in ("float", "double") else "float"
             if ptr:
