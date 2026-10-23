@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run the diagnostic test suite
+        run: python tests/run_tests.py
+
+      - name: Smoke-test the CLI and the web entry
+        run: |
+          python csub.py report examples/$(ls examples | head -1) || true
+          python -c "import ast,sys; ast.parse(open('web.py',encoding='utf-8').read())"
